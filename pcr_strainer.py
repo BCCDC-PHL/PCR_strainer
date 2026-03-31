@@ -7,6 +7,11 @@
 # University of British Columbia, Department of Pathology and Laboratory Medicine
 # kevin.kuchinski@bccdc.ca
 
+# Version is stored here at module level — a single source of truth.
+# Do not encode the version in the filename; use git tags for releases:
+#   git tag -a v0.2.5 -m "Description" && git push origin v0.2.5
+__version__ = '0.2.5'
+
 import sys
 import subprocess
 import os
@@ -15,7 +20,7 @@ import pandas as pd
 
 
 def main():
-    version = '0.2.4'
+    version = __version__
     # Parse command line arguments
     args = parse_args(sys.argv, version)
     print(f'\nPCR_strainer v{version}')
@@ -42,6 +47,19 @@ def main():
     write_variant_report(name, out_path, final_tntblast_results, args['-g'], args['-t'])
     write_missed_seqs_report(name, out_path, final_tntblast_results, args['-g'])
     write_tntblast_results(name, out_path, final_tntblast_results)
+    # Write HTML summary report
+    try:
+        from pcr_strainer_report import write_html_report
+        write_html_report(
+            name, out_path,
+            genome_file=args['-g'],
+            assay_file=args['-a'],
+            min_tm=args['-m'],
+            variant_threshold=args['-t'],
+            tool_version=version,
+        )
+    except ImportError:
+        print('Note: pcr_strainer_report.py not found — HTML report skipped.')
     print('\nDone.\n')
 
 
@@ -106,7 +124,7 @@ def parse_args(args, version):
         if arg in max_arg_values.keys() and value >= max_arg_values[arg]:
             print(f'\nERROR: Value for argument {arg} must be less than {max_arg_values[arg]}')
             print_usage(version)
-            exit(1)        
+            exit(1)
     # Assign default values to unspecified arguments
     for arg, value in default_arg_values.items():
         if arg not in arg_values.keys():
@@ -167,7 +185,7 @@ def read_assay_file(path_to_file):
                 print('\nERROR: Line in assay file not properly formatted:')
                 print(','.join(line))
                 print('\nAssay file lines must be a comma-separated list:')
-                print('assay_name,fwd_primer_name,fwd_primer_seq,rev_primer_name,rev_primer_seq,probe_name,probe_seq') 
+                print('assay_name,fwd_primer_name,fwd_primer_seq,rev_primer_name,rev_primer_seq,probe_name,probe_seq')
                 exit(1)
             else:
                 assay_name = line[0]
@@ -184,7 +202,7 @@ def read_assay_file(path_to_file):
                 # Check if any assay or primer names are empty
                 names = [assay_name, fwd_primer_name, rev_primer_name]
                 names += [probe_name] if probe_seq != '' else []
-                if any([name == '' for name in names]): 
+                if any([name == '' for name in names]):
                     print('\nERROR: Assay and oligo names cannot be empty:')
                     print(','.join(line))
                     print()
@@ -225,7 +243,7 @@ def run_TNTBLAST(assay_details, path_to_genomes, path_to_output, melting_temp, p
     assay = '\t'.join(assay)
     path_to_tntblast_assay = os.path.join(path_to_output, assay_name + '_tntblast_assay.tsv')
     with open(path_to_tntblast_assay, 'w') as output_file:
-        output_file.write(assay + '\n')    
+        output_file.write(assay + '\n')
     # Create terminal command for TNTBLAST and run
     path_to_tntblast_txt_output = os.path.join(path_to_output, assay_name + '_tntblast_output.txt')
     terminal_command = (f'tntblast -i {path_to_tntblast_assay} -d {path_to_genomes} -o {path_to_tntblast_txt_output}'
@@ -233,7 +251,7 @@ def run_TNTBLAST(assay_details, path_to_genomes, path_to_output, melting_temp, p
                         f' --best-match -m 0 -v F')
     completed_process = subprocess.run(terminal_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
     if completed_process.returncode != 0:
-        print(f'\nERROR: TNTBLAST terminated with errors.\nTNTBLAST error code: {completed_process.returncodes}\n')
+        print(f'\nERROR: TNTBLAST terminated with errors.\nTNTBLAST error code: {completed_process.returncode}\n')
         exit(1)
     # GARBAGE COLLECTION (remove TNTBLAST assay TSV file)
     os.remove(path_to_tntblast_assay)
@@ -243,11 +261,16 @@ def run_TNTBLAST(assay_details, path_to_genomes, path_to_output, melting_temp, p
 def parse_tntblast_output(assay_details, job_name, path_to_output):
     """Parses txt format output from TNTBLAST and tabulates relevant data into Pandas dataframes.
     Returns the dataframe."""
-    # Create list of fields to capture from results
+    # Create list of fields to capture from results.
+    # Each string must match the key exactly as it appears in the TNTBLAST output
+    # (left-hand side of ' = ' lines).
     oligos = ['forward primer', 'reverse primer', 'probe']
     fields = ['amplicon range', 'probe range']
     fields += ['name', 'target'] + [oligo + ' mismatches' for oligo in oligos]
-    fields += [oligo + ' gaps' for oligo in oligos] + ['amplicon seq']
+    fields += [oligo + ' gaps' for oligo in oligos]
+    fields += [oligo + ' tm' for oligo in oligos]   # melting temperature for each oligo
+    fields += ["min 3' clamp"]                       # length of exact-match run at the 3' end of fwd primer
+    fields += ['amplicon seq']
     # Create empty dict for tntblast results
     tntblast_results = {field: [] for field in fields}
     # Open TNTBLAST output and parse results into dataframe
@@ -261,49 +284,55 @@ def parse_tntblast_output(assay_details, job_name, path_to_output):
         input_lines = input_file.readlines()
     for line_index, line in enumerate(input_lines):
         if ' = ' in line:
-            key, value = line.split(' = ')
+            key, value = line.split(' = ', 1)   # maxsplit=1 guards against ' = ' in a value
             if key in fields:
                 tntblast_results[key].append(value.strip())
         elif line[0] == '>':
             tntblast_results['target'].append(line.strip().lstrip('>'))
             tntblast_results['amplicon seq'].append(input_lines[line_index+1].strip())
-            # Add NaN for probe oligo fields if probe not provided
+            # Add NaN for probe-specific fields when no probe was provided
             if assay_details[5] == '' and assay_details[6] == '':
                 tntblast_results['probe mismatches'].append(np.nan)
                 tntblast_results['probe gaps'].append(np.nan)
                 tntblast_results['probe range'].append(np.nan)
+                tntblast_results['probe tm'].append(np.nan)
     # Convert dictionary to dataframe and re-order columns
     tntblast_results = pd.DataFrame.from_dict(tntblast_results)
     tntblast_results = tntblast_results[fields]
-    # Rename columns
+    # Rename columns to snake_case
     oligos = ['fwd_primer', 'rev_primer', 'probe']
     cols = ['amplicon_range', 'probe_range']
     cols += ['assay_name', 'target'] + [oligo + '_mismatches' for oligo in oligos]
-    cols += [oligo + '_gaps' for oligo in oligos] + ['amplicon_seq']
+    cols += [oligo + '_gaps' for oligo in oligos]
+    cols += [oligo + '_tm' for oligo in oligos]
+    cols += ['min_3prime_clamp']
+    cols += ['amplicon_seq']
     tntblast_results.columns = cols
-    # Convert mismatches and gaps columns to ints
-    oligos = ['fwd_primer', 'rev_primer']
+    # Convert mismatches and gaps to int, Tm and clamp to float
+    oligos_with_data = ['fwd_primer', 'rev_primer']
     if assay_details[5] != '' and assay_details[6] != '':
-        oligos += ['probe']
-    for oligo in oligos:
+        oligos_with_data += ['probe']
+    for oligo in oligos_with_data:
         tntblast_results[oligo + '_mismatches'] = tntblast_results[oligo + '_mismatches'].astype(int)
-        tntblast_results[oligo + '_gaps'] = tntblast_results[oligo + '_gaps'].astype(int)
+        tntblast_results[oligo + '_gaps']       = tntblast_results[oligo + '_gaps'].astype(int)
+        tntblast_results[oligo + '_tm']         = pd.to_numeric(tntblast_results[oligo + '_tm'], errors='coerce')
+    tntblast_results['min_3prime_clamp'] = pd.to_numeric(tntblast_results['min_3prime_clamp'], errors='coerce')
     # Add column for total oligo errors
-    for oligo in oligos:
+    oligos = ['fwd_primer', 'rev_primer', 'probe']
+    for oligo in oligos_with_data:
         tntblast_results[oligo + '_errors'] = tntblast_results[oligo + '_mismatches'] + tntblast_results[oligo + '_gaps']
     if assay_details[5] == '' and assay_details[6] == '':
         tntblast_results['probe_errors'] = np.nan
     # Add column for total assay errors
-    tntblast_results['total_errors'] = tntblast_results[[oligo + '_errors' for oligo in oligos]].sum(axis=1)
+    tntblast_results['total_errors'] = tntblast_results[[oligo + '_errors' for oligo in oligos_with_data]].sum(axis=1)
     # Add columns for oligo names and oligo seqs
-    oligos = ['fwd_primer', 'rev_primer', 'probe']
     oligo_names = [assay_details[i] for i in [1, 3, 5]]
-    oligo_seqs = [assay_details[i] for i in [2, 4, 6]]
+    oligo_seqs  = [assay_details[i] for i in [2, 4, 6]]
     for oligo, name, seq in zip(oligos, oligo_names, oligo_seqs):
         tntblast_results[oligo + '_name'] = name
         tntblast_results[oligo + '_name'] = tntblast_results[oligo + '_name'].replace('', np.nan)
-        tntblast_results[oligo + '_seq'] = seq
-        tntblast_results[oligo + '_seq'] = tntblast_results[oligo + '_seq'].replace('', np.nan)
+        tntblast_results[oligo + '_seq']  = seq
+        tntblast_results[oligo + '_seq']  = tntblast_results[oligo + '_seq'].replace('', np.nan)
     # Function for getting reverse complement of sequence
     comp_bases = {'A': 'T', 'T': 'A',
                   'G': 'C', 'C': 'G',
@@ -340,12 +369,12 @@ def parse_tntblast_output(assay_details, job_name, path_to_output):
         tntblast_results['probe_site_seq'] = np.nan
     else:
         tntblast_results['amplicon_range'] = tntblast_results['amplicon_range'].str.split(' .. ')
-        tntblast_results['probe_range'] = tntblast_results['probe_range'].str.split(' .. ')
+        tntblast_results['probe_range']    = tntblast_results['probe_range'].str.split(' .. ')
         tntblast_results['probe_site_seq'] = tntblast_results.apply(get_probe_site, axis=1)
-    # Re-order columns
-    oligos = ['fwd_primer', 'rev_primer', 'probe']
-    oligo_cols = ['name', 'seq', 'site_seq', 'mismatches', 'gaps', 'errors']
-    cols = ['assay_name', 'target', 'total_errors'] + [oligo + '_' + col for oligo in oligos for col in oligo_cols]
+    # Re-order columns for final output
+    oligo_cols = ['name', 'seq', 'site_seq', 'mismatches', 'gaps', 'errors', 'tm']
+    cols = (['assay_name', 'target', 'total_errors', 'min_3prime_clamp']
+            + [oligo + '_' + col for oligo in oligos for col in oligo_cols])
     tntblast_results = tntblast_results[cols]
     # GARBAGE COLLECTION
     os.remove(path_to_tntblast_txt_input)
@@ -358,8 +387,9 @@ def write_tntblast_results(job_name, path_to_output, tntblast_results):
     print('Writing PCR results...')
     # Re-order columns
     oligos = ['fwd_primer', 'rev_primer', 'probe']
-    oligo_cols = ['name', 'seq', 'site_seq', 'mismatches', 'gaps', 'errors']
-    cols = ['assay_name', 'target', 'total_errors'] + [oligo + '_' + col for oligo in oligos for col in oligo_cols]
+    oligo_cols = ['name', 'seq', 'site_seq', 'mismatches', 'gaps', 'errors', 'tm']
+    cols = (['assay_name', 'target', 'total_errors', 'min_3prime_clamp']
+            + [oligo + '_' + col for oligo in oligos for col in oligo_cols])
     tntblast_results = tntblast_results[cols]
     # Write output
     path_to_tntblast_tsv = os.path.join(path_to_output, job_name + '_PCR_results.tsv')
@@ -438,7 +468,7 @@ def write_variant_report(job_name, path_to_output, tntblast_results, path_to_gen
     variant_report = variant_report[variant_report['oligo_errors']!=0]
     # Drop report rows with percent of detected below threshold
     variant_report = variant_report[variant_report['perc_of_detected']>=float(threshold)]
-    # Reorder columns an write assay report to TSV file
+    # Reorder columns and write variant report to TSV file
     path_to_report_file = os.path.join(path_to_output, job_name + '_variant_report.tsv')
     variant_report = variant_report.sort_values(['assay_name', 'oligo', 'target_count'], ascending=[True, True, False])
     cols = ['assay_name', 'oligo', 'oligo_name', 'oligo_seq', 'total_targets', 'detected_targets', 'perc_detected',
@@ -459,7 +489,7 @@ def longest_common_kmer(seq_1, seq_2):
         return k[0]
     else:
         return None
-    
+
 
 def align_seqs(seq_1, seq_2):
     if type(seq_1) != list:

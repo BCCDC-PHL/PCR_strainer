@@ -1,127 +1,384 @@
 # PCR_strainer
-PCR_strainer is a tool for assessing the inclusivity of primer and probe oligonucleotides from diagnostic qPCR assays and amplicon sequencing schemes. It depends on thermonucleotideBLAST (TNTBLAST), which conducts local alignments between query oligonucleotides and subject sequences that include a thermodynamic assessment of the alignment. PCR_strainer parses and tabulates the TNTBLAST output to generate reports on assay performance and sequence variants in oligo sites.
 
-You can read more about PCR_strainer and see how it has been applied in the following publications:
-1. Kuchinski KS, Jassem AN, Prystajecky NA. Assessing oligonucleotide designs from early lab developed PCR diagnostic tests for SARS-CoV-2 using the PCR_strainer pipeline. J Clin Virol. 2020 Oct;131:104581. doi: 10.1016/j.jcv.2020.104581. Epub 2020 Aug 21. PMID: 32889496; PMCID: PMC7441044.
-2. Kuchinski KS, Nguyen J, Lee TD, Hickman R, Jassem AN, Hoang LMN, Prystajecky NA, Tyson JR. Mutations in emerging variant of concern lineages disrupt genomic sequencing of SARS-CoV-2 clinical specimens. Int J Infect Dis. 2022 Jan;114:51-54. doi: 10.1016/j.ijid.2021.10.050. Epub 2021 Oct 29. PMID: 34757201; PMCID: PMC8555373.
+PCR_strainer assesses the inclusivity of primer and probe oligonucleotides from diagnostic qPCR assays and amplicon sequencing schemes against large sets of reference genome sequences. It wraps [thermonucleotideBLAST (TNTBLAST)](https://github.com/jgans/thermonucleotideBLAST), which aligns query oligonucleotides to subject sequences with a thermodynamic model, and produces tabular reports and a self-contained HTML summary report suitable for sharing with laboratory staff.
 
-# PCR_strainer Setup
-1. Install TNTBLAST from: https://github.com/jgans/thermonucleotideBLAST
-2. Install Python (version >= 3.7)
-3. Install PCR_strainer:
+This is the BCCDC-PHL fork of [Kevin Kuchinski's PCR_strainer](https://github.com/KevinKuchinski/PCR_strainer), extended with additional TNTBLAST output fields, a static HTML summary report, and a more maintainable code structure.
+
+---
+
+## How it works
+
+```mermaid
+flowchart TD
+    A(["`**Assay CSV**
+    assay names
+    primer & probe sequences`"]) --> C
+
+    B(["`**Reference genomes**
+    FASTA file`"]) --> C
+
+    C["`**pcr_strainer.py**`"]
+
+    C -->|"for each assay"| D
+
+    subgraph tntblast ["For each assay"]
+        D[["TNTBLAST
+        thermodynamic alignment"]]
+        D --> E[/"Raw TNTBLAST output (.txt)"/]
+        E --> F["parse_tntblast_output()
+        extract mismatches, gaps,
+        Tm, 3′ clamp per genome"]
+    end
+
+    F --> G[("Accumulated results
+    DataFrame")]
+
+    G --> H["write_assay_report()
+    inclusivity by error level"]
+    G --> I["write_variant_report()
+    oligo site variants"]
+    G --> J["write_missed_seqs_report()
+    undetected sequences"]
+    G --> K["write_tntblast_results()
+    full per-genome results"]
+    G --> L["write_html_report()
+    pcr_strainer_report.py"]
+
+    H --> M[/"assay_report.tsv"/]
+    I --> N[/"variant_report.tsv"/]
+    J --> O[/"missed_seqs_report.tsv"/]
+    K --> P[/"PCR_results.tsv"/]
+    L --> Q[/"report.html
+    static · no JS · SVG charts"/]
+
+    style A fill:#EBF3FB,stroke:#2E75B6
+    style B fill:#EBF3FB,stroke:#2E75B6
+    style Q fill:#D4EDDA,stroke:#2E7D46
+    style M fill:#F5F5F5,stroke:#888
+    style N fill:#F5F5F5,stroke:#888
+    style O fill:#F5F5F5,stroke:#888
+    style P fill:#F5F5F5,stroke:#888
+    style tntblast fill:#FFFDE7,stroke:#B07800
 ```
-$ python3 -m pip install pcr_strainer
+
+---
+
+## Publications
+
+If you use PCR_strainer in your work, please cite the original publications:
+
+1. Kuchinski KS, Jassem AN, Prystajecky NA. Assessing oligonucleotide designs from early lab developed PCR diagnostic tests for SARS-CoV-2 using the PCR_strainer pipeline. *J Clin Virol.* 2020 Oct;131:104581. doi: [10.1016/j.jcv.2020.104581](https://doi.org/10.1016/j.jcv.2020.104581). PMID: 32889496.
+2. Kuchinski KS, Nguyen J, Lee TD, Hickman R, Jassem AN, Hoang LMN, Prystajecky NA, Tyson JR. Mutations in emerging variant of concern lineages disrupt genomic sequencing of SARS-CoV-2 clinical specimens. *Int J Infect Dis.* 2022 Jan;114:51-54. doi: [10.1016/j.ijid.2021.10.050](https://doi.org/10.1016/j.ijid.2021.10.050). PMID: 34757201.
+
+---
+
+## Dependencies
+
+| Dependency | Notes |
+|---|---|
+| [TNTBLAST](https://github.com/jgans/thermonucleotideBLAST) | Must be installed and on your `PATH` |
+| Python ≥ 3.8 | |
+| pandas | TSV parsing and report generation |
+| numpy | Numerical operations |
+| matplotlib | Chart rendering in the HTML report (Agg backend — no display required) |
+
+All Python dependencies are available via conda-forge or pip and are standard in most scientific Python environments (Anaconda, conda-forge).
+
+---
+
+## Installation
+
+**1. Install TNTBLAST**
+
+Follow the build instructions at https://github.com/jgans/thermonucleotideBLAST and ensure `tntblast` is available on your `PATH`.
+
+**2. Install Python dependencies**
+
+```bash
+pip install pandas numpy matplotlib
+# or
+conda install -c conda-forge pandas numpy matplotlib
 ```
 
-# PCR_strainer Usage
-<b>Usage example:</b>
+**3. Clone this repository**
+
+```bash
+git clone https://github.com/BCCDC-PHL/PCR_strainer.git
+cd PCR_strainer
 ```
-$ pcr_strainer -a <assay CSV file> -g <genomes FASTA file> -o <output dir>/<output name> [<optional args>]
+
+---
+
+## Usage
+
+```bash
+python pcr_strainer.py \
+    -a assays.csv \
+    -g genomes.fasta \
+    -o results/run_name \
+    [optional arguments]
 ```
-<b>Required arguments:</b>
 
-	-a : path to assay details in CSV file
-	-g : path to target genomes in FASTA file
-	-o : path to output directory and name to append to output files
+### Required arguments
 
-<b>Optional arguments:</b>
+| Flag | Description |
+|---|---|
+| `-a` | Path to assay CSV file (see [Assay file format](#assay-file-format)) |
+| `-g` | Path to reference genomes in FASTA format |
+| `-o` | Output prefix: path + base name for output files (e.g. `results/run1` writes `results/run1_*.tsv` and `results/run1_report.html`) |
 
-	-t : minimum prevalence (%) of total errors and oligo site variants reported in reports (default = 0 (reports everything), min > 0, max < 100)
-	-m : minimum Tm (degrees C) for primers and probes (default = 45)
-	-p : molar concentration of primer oligos (uM) (default = 1, min > 0)
-	-P : molar concentration of probe oligos (uM) (default = 1, min > 0)
+### Optional arguments
 
-<b>The assay CSV file:</b>
+| Flag | Default | Description |
+|---|---|---|
+| `-m` | 45 | Minimum Tm (°C) for primers and probes |
+| `-t` | 0 | Minimum prevalence (%) of variants to include in reports. `0` reports everything; must be `> 0` and `< 100` if set |
+| `-p` | 1 | Molar concentration of primer oligos (µM) |
+| `-P` | 1 | Molar concentration of probe oligos (µM) |
 
-PCR_strainer expects a csv file where each line describes a PCR assay using the following format: 
-assay_name, forward_primer_name, forward_primer_seq, reverse_primer_name, reverse_primer_seq, probe_name, probe_seq
-Example assay file entry:
+### Example
+
+```bash
+python pcr_strainer.py \
+    -a assays/influenza_assays.csv \
+    -g genomes/influenza_HA_2024.fasta \
+    -o results/flu_HA_2024 \
+    -m 50 \
+    -t 1
+```
+
+This runs all assays in `influenza_assays.csv` against `influenza_HA_2024.fasta`, requires Tm ≥ 50 °C, and reports variants present in ≥ 1% of detected genomes. Output files are written to the `results/` directory.
+
+---
+
+## Assay file format
+
+The assay CSV has one assay per line with no header row. Lines with a probe use 7 fields; lines without a probe use 5 fields.
+
+**With probe (qPCR):**
+```
+assay_name,fwd_primer_name,fwd_primer_seq,rev_primer_name,rev_primer_seq,probe_name,probe_seq
+```
+
+**Without probe (conventional PCR or amplicon sequencing):**
+```
+assay_name,fwd_primer_name,fwd_primer_seq,rev_primer_name,rev_primer_seq
+```
+
+**Rules:**
+- All oligo sequences should be written 5′ → 3′
+- IUPAC degenerate bases are permitted (A T G C W S M K R Y B V D H N)
+- FASTA headers in the reference genome file must be unique
+- Assay names and all oligo names must be unique across the entire file
+
+**Example:**
 ```
 BCCDC_SARS2_RdRP,BCCDC_RdRP_Fwd,TGCCGATAAGTATGTCCGCA,BCCDC_RdRP_Rev,CAGCATCGTCAGAGAGTATCATCATT,BCCDC_RdRP_Probe,TTGACACAGACTTTGTGAATG
+CDC_N2,2019-nCoV_N2-F,TTACAAACATTGGCCGCAAA,2019-nCoV_N2-R,GCGCGACATTCCGAAGAA,2019-nCoV_N2-P,ACAATTTGCCCCCAGCGCTTCTG
+FluA_RP1,FIuA-RP1-F,ATGCMKRYW,FIuA-RP1-R,CAGCATCGTCAG
 ```
-  * all oligo sequences should be writen in the 5' to 3' orientation
-  * degenerate nucleotides are permitted in the assay oligo sequences
-  * the probe name and probe sequence can be omitted for a conventional PCR
-  * for amplicon sequencing schemes, enter primer pairs as lines in the same file
 
-<b>The reference genomes</b>: 
+---
 
-PCR_strainer expects DNA sequences in FASTA format without spaces in the header. For single-stranded genomes, ensure all sequences represent the same sense (e.g. all coding strand). We recommend you filter your reference genomes to remove sequences containing degenerate nucleotides in target locations to limit false negatives; thermonucleotideBLAST does not expand degenerate nucleotide possibilities for the subject sequences.
+## Reference genomes
 
-<b>The name of the output</b>: 
+PCR_strainer expects DNA sequences in FASTA format.
 
-PCR_strainer generates four TSV files. The output name will be appended to these file names (no spaces). Including a file path before the output name will write output files to that directory.
+- FASTA headers must be unique and must not contain spaces
+- For single-stranded RNA genomes (influenza, SARS-CoV-2, etc.), ensure all sequences represent the same strand sense (e.g. all coding/positive sense)
+- TNTBLAST does not expand degenerate nucleotides in subject sequences. Sequences with degenerate bases in primer binding sites may produce false negatives; consider filtering these out before running
 
-# PCR_strainer Reports
-PCR_strainer generates three report files and a table of raw results from TNTBLAST.
+**Data governance note:** If your reference genomes were downloaded from GISAID, the variant sequences reported in the HTML report are derived from GISAID-restricted data. Review GISAID's terms of service before distributing this report beyond your immediate team. Genomes sourced from NCBI/GenBank carry no such restriction.
 
-## assay_report
-The assay_report indicates how many reference sequences are impacted by nucleotide mismatches and gaps acrosss all oligos for each assay. Filter this table for rows with 0 in the <b>errors</b> columns for quick overview of assay inclusivity; this will quickly show what percentage are the provided reference sequences had no gaps or mismatches against the provided assays.
+---
 
-<b>COLUMN : DESCRIPTION
+## Output files
 
-  assay_name</b> : The name of the assay from the assay CSV file
+PCR_strainer writes five output files per run, all sharing the prefix given to `-o`.
 
-  <b>total_targets</b> : The total number of reference sequences in the genomes file
+| File | Description |
+|---|---|
+| `<prefix>_assay_report.tsv` | Assay-level inclusivity summary |
+| `<prefix>_variant_report.tsv` | Oligo site variants above the reporting threshold |
+| `<prefix>_missed_seqs_report.tsv` | Reference sequences not detected by each assay |
+| `<prefix>_PCR_results.tsv` | Full per-genome TNTBLAST results |
+| `<prefix>_report.html` | Self-contained HTML summary report (see below) |
 
-  <b>detected_targets</b> : The number of reference sequences in the genomes file in which thermonucleotideBLAST was able to identify all oligo sites and generate an amplicon
+---
 
-  <b>perc_detected</b> : detected_targets as a percentage of total_targets
+### assay_report.tsv
 
-  <b>total_errors</b> : The number of nucleotide errors across all of the assay's oligonucleotides; this includes gaps and the total number of unannealed nucleotides (including those impacted by nearby mismatches despite having complementary base pairing)
+One row per assay per total-error level. Filter for `total_errors == 0` for a quick inclusivity overview.
 
-  <b>target_count</b>: The number of reference sequences with the indicated number of errors for this assay
+| Column | Description |
+|---|---|
+| `assay_name` | Assay identifier from the assay CSV |
+| `total_targets` | Total number of sequences in the reference FASTA |
+| `detected_targets` | Number of sequences detected by TNTBLAST for this assay |
+| `perc_detected` | `detected_targets / total_targets × 100` |
+| `total_errors` | Total mismatches + gaps across all oligos for this error level |
+| `target_count` | Number of detected sequences at this error level |
+| `perc_of_detected` | `target_count / detected_targets × 100` |
+| `perc_of_total` | `target_count / total_targets × 100` |
 
-  <b>perc_of_detected</b> : target_count as a percentage of detected_targets
-  
-  <b>perc_of_total</b> : target_count as a percentage of total_targets
+---
 
-## variant_report
-The variant_report provides information about locations in the provided reference sequences that are targeted by assay oligos, but contain gaps and mismatches. This report identifies common sequence variants in oligo sites, facilitating oligo re-design. In oligo site variant sequences, mismatched bases are written in lower case, deletions are indicated with dashes, and insertions are surrounded by parentheses. 
+### variant_report.tsv
 
-<b>COLUMN : DESCRIPTION
+One row per unique oligo site variant per assay, for variants at or above the prevalence threshold set by `-t`. Only variants with at least one error are included.
 
-  assay_name</b> : The name of the assay from the assay file
-  
-  <b>oligo</b> : Forward primer, reverse primer, or probe
-  
-  <b>oligo_name</b> : Name of the oligo from the assay file
-  
-  <b>oligo_seq</b> : The sequence of the oligo provided in the assay file
+| Column | Description |
+|---|---|
+| `assay_name` | Assay identifier |
+| `oligo` | Which oligo: `fwd_primer`, `rev_primer`, or `probe` |
+| `oligo_name` | Oligo identifier from the assay CSV |
+| `oligo_seq` | Designed oligo sequence (5′ → 3′) |
+| `total_targets` | Total reference sequences |
+| `detected_targets` | Sequences detected by this assay |
+| `perc_detected` | Overall assay inclusivity (%) |
+| `oligo_site_variant` | The genome sequence at the oligo binding site, written in site-variant notation (uppercase = match, lowercase = mismatch, `-` = deletion, `(X)` = insertion) |
+| `oligo_errors` | Mismatches + gaps for this variant |
+| `target_count` | Number of genomes with this variant |
+| `perc_of_detected` | `target_count / detected_targets × 100` |
+| `perc_of_total` | `target_count / total_targets × 100` |
 
-  <b>total_targets</b> : The total number of reference sequences in the genomes file
+---
 
-  <b>detected_targets</b> : The number of reference sequences in the genomes file in which thermonucleotideBLAST was able to identify all oligo sites and generate an amplicon
+### missed_seqs_report.tsv
 
-  <b>perc_detected</b> : detected_targets as a percentage of total_targets
+Reference sequences that were not detected by each assay. Useful for diagnosing whether missed sequences are likely low-quality (high N content) or genuine assay failures.
 
-  <b>oligo_site_variant</b> : The variant sequence at the oligo site, written in 'oligo sense', ie the same sense as the PCR oligo
-  
-  <b>oligo_errors</b> : The number of nucleotide errors present at this variant site; this includes gaps and the total number of unannealed nucleotides (including those impacted by nearby mismatches despite having complementary base pairing)
+| Column | Description |
+|---|---|
+| `assay_name` | Assay identifier |
+| `target` | FASTA header of the missed sequence |
+| `target_length` | Length of the sequence in base pairs |
+| `total_Ns` | Count of ambiguous N bases in the sequence |
+| `perc_Ns` | `total_Ns / target_length × 100` |
 
-  <b>target_count</b>: The number of reference sequences with the indicated oligo site variant
+---
 
-  <b>perc_of_detected</b> : target_count as a percentage of detected_targets
-  
-  <b>perc_of_total</b> : target_count as a percentage of total_targets
+### PCR_results.tsv
 
-## missed_seqs_report
-The missed_report provides the name of target reference sequences in the genomes files that were not aligned by thermonucleotideBLAST. PCR_strainer provides the headers of these missed targets for trouble-shooting assays with high percentages of missed targets (i.e. low perc_detected values). These targets are generally either a) poor quality and contain too many Ns in/around the oligo target sites, or b) too divergent from the oligos.
+Full per-genome TNTBLAST results, one row per detected genome per assay. This is the primary input to `pcr_strainer_report.py` for the HTML report.
 
-<b>COLUMN : DESCRIPTION
+**Top-level columns:**
 
-  assay_name</b> : The name of the assay from the assay file
-  
-  <b>target</b> : The FASTA header of the missed reference sequence in the genomes file
-  
-  <b>target_length</b> : The length of the target sequence in nucleotides
+| Column | Description |
+|---|---|
+| `assay_name` | Assay identifier |
+| `target` | FASTA header of the detected sequence |
+| `total_errors` | Sum of mismatches and gaps across all oligos |
+| `min_3prime_clamp` | Length (bp) of the exact-match run at the 3′ end of the forward primer for this alignment. Longer values indicate stronger anchoring for Taq extension |
 
-  <b>total_Ns</b> : The number of nucleotide positions in the target sequence represented by ambiguous N bases
-  
-  <b>perc_Ns</b> : The percentage of the target sequence represented by ambiguous N bases
+**Per-oligo columns** (repeated for `fwd_primer_`, `rev_primer_`, and `probe_`):
 
-## PCR_results
-This  file contains the parsed and tabulated output from TNTBLAST. Each line describes the results from one assasy against one reference sequence. One use for this data is to identify headers for genome sequences containing specific oligo site variants. For instance, imagine the variant_report identifies a forward primer site variant in 5% of genomes. The sequence for that forward primer site variant could be copied from the variant_report, then used to search the fwd_primer_site_seq column in the PCR_results files to identify headers for sequences containing this variant.
+| Column | Description |
+|---|---|
+| `*_name` | Oligo identifier |
+| `*_seq` | Designed oligo sequence |
+| `*_site_seq` | Genome sequence at the binding site in site-variant notation |
+| `*_mismatches` | Number of base mismatches |
+| `*_gaps` | Number of insertion/deletion events |
+| `*_errors` | `mismatches + gaps` |
+| `*_tm` | Melting temperature (°C) calculated by TNTBLAST for this alignment |
 
-# ---
-Questions, feedback, and bug reports are welcome! kevin.kuchinski@bccdc.ca
+`probe_mismatches`, `probe_gaps`, `probe_errors`, and `probe_tm` are `NaN` for assays without a probe.
+
+---
+
+## HTML report
+
+The HTML report (`<prefix>_report.html`) is generated automatically at the end of each run. It is a self-contained static file with no JavaScript and no external dependencies — it opens correctly in any browser, including with JavaScript disabled, and will not trigger endpoint-protection alerts on managed Windows PCs.
+
+**To open from a Windows network share:** open the file from a mapped drive letter (e.g. `Z:\results\run1_report.html`) rather than a UNC path (`\\server\share\...`). Some browsers classify UNC paths as the Internet zone and may restrict local HTML files.
+
+### Report sections
+
+**Overall verdict banner** — PASS / CAUTION / ACTION REQUIRED across all assays in the run.
+
+**Assay summary table** — one row per assay with status badge, detected count, inclusivity bar, worst-performing oligo, and peak mismatch position.
+
+**Per-assay cards** (collapsible) — for each assay:
+- Status banner with plain-language action message for non-passing assays
+- Metric cards: overall inclusivity, perfect match rate, missed genomes
+- Error distribution chart (% of detected genomes at 0, 1, 2, 3+ total errors)
+- Mismatch rate by oligo chart (% with ≥1 error per oligo)
+- Per-position mismatch heatmap for each oligo, with Tm range and 3′ clamp shown beneath the forward primer
+- Sequence variants table with interpretation and prevalence bars
+
+Charts are rendered as inline SVG, which is crisp at any zoom level or print size.
+
+### Standalone use
+
+The report script can also be run independently after a PCR_strainer run:
+
+```bash
+python pcr_strainer_report.py \
+    -o results/run_name \
+    -g genomes.fasta \
+    -a assays.csv \
+    --min-tm 50 \
+    --variant-threshold 1
+```
+
+All flags mirror the corresponding PCR_strainer arguments. The script reads the four TSV files already written by PCR_strainer.
+
+### Status thresholds
+
+| Status | Condition |
+|---|---|
+| **PASS** | Overall inclusivity ≥ 90% and no oligo with ≥ 15% mismatch rate |
+| **CAUTION** | Overall inclusivity ≥ 75%, or any oligo with ≥ 15% mismatch rate |
+| **ACTION REQUIRED** | Overall inclusivity < 75% |
+
+Thresholds can be adjusted with `--pass-threshold` and `--caution-threshold`.
+
+---
+
+## Degenerate base handling
+
+TNTBLAST correctly treats degenerate bases in oligo sequences when computing mismatches (e.g. `R` at a position matches both `A` and `G`). The mismatch count columns in `PCR_results.tsv` are therefore accurate.
+
+However, the site-variant notation field (`*_site_seq`) is produced by a character-by-character comparison that does not account for degeneracy — a genome base that is a valid match for a degenerate oligo base may appear as lowercase (mismatch notation) in this field. The HTML report corrects for this: per-position mismatch frequencies in the heatmap are computed using the full IUPAC lookup table, so positions with degenerate oligo bases are not falsely reported as 100% mismatch.
+
+---
+
+## Versioning
+
+The version string is defined at module level in `pcr_strainer.py`:
+
+```python
+__version__ = '0.2.5'
+```
+
+Releases are tagged in git — do not encode the version in the filename. To tag a release:
+
+```bash
+git tag -a v0.2.5 -m "Description of changes"
+git push origin v0.2.5
+```
+
+---
+
+## Changelog
+
+### v0.2.5 (BCCDC-PHL)
+- Renamed `PCR_strainer_v_0_2_4.py` → `pcr_strainer.py`; version now stored as `__version__` at module level
+- Added new TNTBLAST output fields: `fwd_primer_tm`, `rev_primer_tm`, `probe_tm`, `min_3prime_clamp`
+- Added `pcr_strainer_report.py`: self-contained static HTML summary report with no JavaScript
+- Fixed typo `completed_process.returncodes` → `returncode` in TNTBLAST error handling
+- Fixed `line.split(' = ')` → `line.split(' = ', 1)` to guard against values containing ` = `
+- Fixed degenerate base false-positives in per-position heatmap (IUPAC lookup table)
+- Fixed IUPAC regex missing uppercase `M` and `K`
+
+### v0.2.4 (original)
+- See [upstream repository](https://github.com/KevinKuchinski/PCR_strainer) for prior history
+
+---
+
+## Acknowledgements
+
+PCR_strainer was originally developed by Kevin Kuchinski at the British Columbia Centre for Disease Control Public Health Laboratory (BCCDC-PHL) and the University of British Columbia. This fork is maintained by the BCCDC-PHL Bioinformatics team.
+
+TNTBLAST is developed and maintained by Jason Gans at Los Alamos National Laboratory.

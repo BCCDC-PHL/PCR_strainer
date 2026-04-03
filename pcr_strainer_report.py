@@ -6,7 +6,7 @@ Generate a self-contained, fully static HTML inclusivity report from
 PCR_strainer TSV output files.
 
 The output HTML contains no JavaScript.  Charts are rendered server-side
-by matplotlib and embedded as base64-encoded PNG images.  The report opens
+by matplotlib as inline SVG, which is crisp at any zoom level or print size.  The report opens
 correctly with JavaScript disabled and will not trigger AV/endpoint-protection
 alerts on managed Windows PCs.
 
@@ -48,7 +48,6 @@ Author: BCCDC-PHL
 """
 
 import argparse     # command-line argument parsing
-import base64       # encode matplotlib PNG output for inline embedding
 import io           # BytesIO buffer for matplotlib figure output
 import logging      # structured logging with file handler for audit trail
 import os           # file I/O, permissions (os.open), path handling
@@ -558,6 +557,13 @@ def build_report_data(
             oligo_chart_labels.append(oligo_labels[oligo])
             oligo_chart_values.append(any_mm_pct)
 
+            # PCR results rows for this assay/oligo — used to look up per-variant Tm
+            site_col = f'{oligo}_site_seq'
+            tm_col   = f'{oligo}_tm'
+            pcr_assay = (pcr[pcr['assay_name'] == assay_name]
+                         if not pcr.empty and 'assay_name' in pcr.columns
+                         else pd.DataFrame())
+
             variants_out: List[dict] = []
             if not vr_a.empty and 'oligo' in vr_a.columns:
                 vr_ol = vr_a[vr_a['oligo'] == oligo].copy()
@@ -569,13 +575,61 @@ def build_report_data(
                         f'{assay_name}/{oligo} variant')
                     if not variant_seq:
                         continue
+
+                    # Tm distribution for the genomes that carry this specific variant
+                    v_tm_stats: Optional[dict] = None
+                    if (not pcr_assay.empty
+                            and site_col in pcr_assay.columns
+                            and tm_col   in pcr_assay.columns):
+                        v_rows  = pcr_assay[pcr_assay[site_col] == variant_seq]
+                        v_tm_vals = pd.to_numeric(v_rows[tm_col], errors='coerce').dropna()
+                        if not v_tm_vals.empty:
+                            v_tm_stats = {
+                                'min':  round(float(v_tm_vals.min()),  1),
+                                'mean': round(float(v_tm_vals.mean()), 1),
+                                'max':  round(float(v_tm_vals.max()),  1),
+                            }
+
+                    # 3' clamp distribution for genomes carrying this variant
+                    # (forward primer only — clamp is a fwd primer property)
+                    v_clamp_stats: Optional[dict] = None
+                    if (oligo == 'fwd_primer'
+                            and not pcr_assay.empty
+                            and site_col in pcr_assay.columns
+                            and 'min_3prime_clamp' in pcr_assay.columns):
+                        v_rows_c = pcr_assay[pcr_assay[site_col] == variant_seq]
+                        v_clamp_vals = pd.to_numeric(
+                            v_rows_c['min_3prime_clamp'], errors='coerce').dropna()
+                        if not v_clamp_vals.empty:
+                            v_clamp_stats = {
+                                'min':  int(v_clamp_vals.min()),
+                                'mean': round(float(v_clamp_vals.mean()), 1),
+                                'max':  int(v_clamp_vals.max()),
+                            }
+
                     variants_out.append({
-                        'seq':    variant_seq,
-                        'errors': int(vrow['oligo_errors'])        if pd.notna(vrow.get('oligo_errors'))      else 0,
-                        'count':  int(vrow['target_count'])        if pd.notna(vrow.get('target_count'))      else 0,
-                        'pct':    round(float(vrow['perc_of_detected']), 1)
-                                  if pd.notna(vrow.get('perc_of_detected')) else 0.0,
+                        'seq':         variant_seq,
+                        'errors':      int(vrow['oligo_errors'])        if pd.notna(vrow.get('oligo_errors'))      else 0,
+                        'count':       int(vrow['target_count'])        if pd.notna(vrow.get('target_count'))      else 0,
+                        'pct':         round(float(vrow['perc_of_detected']), 1)
+                                       if pd.notna(vrow.get('perc_of_detected')) else 0.0,
+                        'tm_stats':    v_tm_stats,
+                        'clamp_stats': v_clamp_stats,
                     })
+
+            # Tm statistics across detected genomes for this oligo
+            tm_col  = f'{oligo}_tm'
+            tm_stats: Optional[dict] = None
+            if not pcr.empty and 'assay_name' in pcr.columns:
+                pcr_a_oligo = pcr[pcr['assay_name'] == assay_name]
+                if tm_col in pcr_a_oligo.columns:
+                    tm_vals = pd.to_numeric(pcr_a_oligo[tm_col], errors='coerce').dropna()
+                    if not tm_vals.empty:
+                        tm_stats = {
+                            'min':  round(float(tm_vals.min()),  1),
+                            'mean': round(float(tm_vals.mean()), 1),
+                            'max':  round(float(tm_vals.max()),  1),
+                        }
 
             oligos_out.append({
                 'type':       oligo,
@@ -585,7 +639,20 @@ def build_report_data(
                 'any_mm_pct': any_mm_pct,
                 'mm_pct':     pos_data['mm_pct'],
                 'variants':   variants_out,
+                'tm_stats':   tm_stats,
             })
+
+        # 3' clamp statistics across detected genomes for this assay
+        clamp_stats: Optional[dict] = None
+        if not pcr.empty and 'assay_name' in pcr.columns and 'min_3prime_clamp' in pcr.columns:
+            pcr_a_clamp = pcr[pcr['assay_name'] == assay_name]
+            clamp_vals  = pd.to_numeric(pcr_a_clamp['min_3prime_clamp'], errors='coerce').dropna()
+            if not clamp_vals.empty:
+                clamp_stats = {
+                    'min':  int(clamp_vals.min()),
+                    'mean': round(float(clamp_vals.mean()), 1),
+                    'max':  int(clamp_vals.max()),
+                }
 
         peak_oligo: Optional[str] = None
         peak_pct   = 0.0
@@ -637,6 +704,7 @@ def build_report_data(
             'peak_oligo':        peak_oligo,
             'peak_pct':          round(peak_pct, 1),
             'peak_pos':          peak_pos,
+            'clamp_stats':       clamp_stats,
         })
 
     overall   = _overall_status(assays_data) if assays_data else 'pass'
@@ -673,32 +741,34 @@ def build_report_data(
     }
 
 
-# ── Chart generation (matplotlib → base64 PNG) ───────────────────────────────
+# ── Chart generation (matplotlib → inline SVG) ──────────────────────────────
+# SVG is vector-based: crisp at any screen resolution, zoom level, or print
+# size. No base64 encoding is needed; the SVG markup embeds directly in HTML.
 
-def _png_b64(fig: 'plt.Figure') -> str:
-    """Render a matplotlib figure to a base64-encoded PNG string, then close it."""
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', dpi=130, bbox_inches='tight')
+def _fig_svg(fig: 'plt.Figure') -> str:
+    """Render a matplotlib figure to an inline SVG string, then close it."""
+    buf = io.StringIO()
+    fig.savefig(buf, format='svg', bbox_inches='tight')
     plt.close(fig)
-    return base64.b64encode(buf.getvalue()).decode()
+    svg = buf.getvalue()
+    # Strip the XML declaration — browsers don't need it for inline SVG.
+    start = svg.find('<svg')
+    return svg[start:] if start != -1 else svg
 
 
-def _err_chart_png(err_dist: dict, status: str) -> str:
+def _err_chart_svg(err_dist: dict, status: str) -> str:
     """
-    Vertical bar chart showing the percentage of detected genomes at each
-    total-error level (0, 1, 2, 3+).  The zero-error bar uses the status
-    colour; the remaining bars use a lighter tint.
+    Vertical bar chart: percentage of detected genomes at each error level.
+    The zero-error bar uses the status colour; the rest use a lighter tint.
     """
-    labels = err_dist['labels']
-    values = err_dist['values']
-    colours = [_STATUS_COLOUR.get(status, '#888')] + \
-              [_STATUS_COLOUR_LIGHT.get(status, '#ccc')] * (len(values) - 1)
+    labels  = err_dist['labels']
+    values  = err_dist['values']
+    colours = ([_STATUS_COLOUR.get(status, '#888')] +
+               [_STATUS_COLOUR_LIGHT.get(status, '#ccc')] * (len(values) - 1))
 
     fig, ax = plt.subplots(figsize=(3.8, 2.2))
     bars = ax.bar(labels, values, color=colours, width=0.6,
                   edgecolor='white', linewidth=0.5)
-
-    # Label each bar with its value
     for bar, val in zip(bars, values):
         if val > 0:
             ax.text(bar.get_x() + bar.get_width() / 2,
@@ -718,23 +788,22 @@ def _err_chart_png(err_dist: dict, status: str) -> str:
     fig.patch.set_facecolor('white')
     ax.set_facecolor('white')
     fig.tight_layout(pad=0.4)
-    return _png_b64(fig)
+    return _fig_svg(fig)
 
 
-def _oligo_chart_png(oligo_chart: dict) -> str:
+def _oligo_chart_svg(oligo_chart: dict) -> str:
     """
-    Horizontal bar chart showing the percentage of detected genomes with
-    at least one mismatch in each oligo.  Each bar is coloured by severity.
+    Horizontal bar chart: percentage of detected genomes with ≥1 mismatch
+    per oligo. Each bar is coloured by severity threshold.
     """
     labels = oligo_chart['labels']
     values = oligo_chart['values']
 
     if not labels:
-        # No oligos found — return a tiny blank PNG
         fig, ax = plt.subplots(figsize=(3.8, 1.0))
         ax.axis('off')
         fig.patch.set_facecolor('white')
-        return _png_b64(fig)
+        return _fig_svg(fig)
 
     colours = [
         _STATUS_COLOUR['action']  if v >= OLIGO_ACTION  else
@@ -746,8 +815,6 @@ def _oligo_chart_png(oligo_chart: dict) -> str:
     fig, ax = plt.subplots(figsize=(3.8, 0.6 + 0.5 * len(labels)))
     bars = ax.barh(labels, values, color=colours, height=0.5,
                    edgecolor='white', linewidth=0.5)
-
-    # Label each bar
     for bar, val in zip(bars, values):
         ax.text(bar.get_width() + 0.3,
                 bar.get_y() + bar.get_height() / 2,
@@ -767,7 +834,7 @@ def _oligo_chart_png(oligo_chart: dict) -> str:
     fig.patch.set_facecolor('white')
     ax.set_facecolor('white')
     fig.tight_layout(pad=0.4)
-    return _png_b64(fig)
+    return _fig_svg(fig)
 
 
 # ── HTML generation helpers ───────────────────────────────────────────────────
@@ -869,8 +936,17 @@ def _variant_seq_html(seq: str) -> str:
 
 
 def _interpret_variant(oligo_seq: str, var_seq: str,
-                       pct: float, oligo_type: str) -> str:
-    """Plain-text interpretation of a variant for the variants table."""
+                       pct: float, oligo_type: str,
+                       tm_stats: Optional[dict] = None,
+                       clamp_stats: Optional[dict] = None) -> str:
+    """
+    Plain-text interpretation of a variant for the variants table.
+
+    tm_stats    : {'min': float, 'mean': float, 'max': float} for this oligo,
+                  or None if not available.
+    clamp_stats : {'min': int, 'mean': float, 'max': int} for the forward primer,
+                  or None (always None for rev primer / probe).
+    """
     mm_pos = []
     oligo_pos = 0
     for c in var_seq:
@@ -885,13 +961,27 @@ def _interpret_variant(oligo_seq: str, var_seq: str,
     is3prime = any(p >= n - 5 for p in mm_pos)
     is5prime = all(p < 5      for p in mm_pos) if mm_pos else False
     is_probe = oligo_type == 'probe'
+    is_fwd   = oligo_type == 'fwd_primer'
 
-    risk = ''
-    if pct >= 15 or (pct >= 5 and is3prime):
+    # ── Risk level ────────────────────────────────────────────────────────────
+    # Elevated by 3′ position, low clamp, or borderline Tm
+    low_clamp = clamp_stats is not None and clamp_stats['min'] < 3
+    low_tm    = tm_stats    is not None and tm_stats['min'] < 50
+
+    risk_score = 0
+    if pct >= 15:                      risk_score += 2
+    elif pct >= 5:                     risk_score += 1
+    if is3prime and not is_probe:      risk_score += 1
+    if low_clamp and is_fwd:           risk_score += 1
+
+    if risk_score >= 3:
         risk = 'HIGH RISK. '
-    elif pct >= 5:
+    elif risk_score >= 1:
         risk = 'MODERATE RISK. '
+    else:
+        risk = ''
 
+    # ── Positional detail ─────────────────────────────────────────────────────
     pos_str = ', '.join(f'pos {p+1}' for p in mm_pos) if mm_pos else ''
     detail  = f'Mismatch at {pos_str}.' if pos_str else ''
     if is3prime and not is_probe:
@@ -901,9 +991,29 @@ def _interpret_variant(oligo_seq: str, var_seq: str,
     if is_probe:
         detail += ' Probe mismatch may reduce fluorescence signal.'
 
-    threshold = ('Urgent review.'      if pct >= 20 else
-                 'Review recommended.' if pct >= 10 else
-                 'Monitor for increase.' if pct >= 5 else 'Monitor.')
+    # ── Tm note ───────────────────────────────────────────────────────────────
+    if tm_stats is not None:
+        if low_tm:
+            detail += (f' Min Tm {tm_stats["min"]}\u00b0C is already near the'
+                       f' assay threshold; any additional destabilisation'
+                       f' increases drop-out risk.')
+        elif is3prime and tm_stats['min'] < 55:
+            detail += (f' Min Tm {tm_stats["min"]}\u00b0C — 3\u2032 mismatch'
+                       f' may cause further Tm depression in affected genomes.')
+
+    # ── 3′ clamp note (fwd primer only) ──────────────────────────────────────
+    if clamp_stats is not None and is_fwd:
+        if clamp_stats['min'] < 2:
+            detail += (f' 3\u2032 clamp as low as {clamp_stats["min"]} bp —'
+                       f' very weak anchoring; Taq extension may fail.')
+        elif clamp_stats['min'] < 3:
+            detail += (f' 3\u2032 clamp min {clamp_stats["min"]} bp —'
+                       f' marginal anchoring; monitor for reduced sensitivity.')
+
+    # ── Urgency ───────────────────────────────────────────────────────────────
+    threshold = ('Urgent review.'        if pct >= 20 else
+                 'Review recommended.'   if pct >= 10 else
+                 'Monitor for increase.' if pct >= 5  else 'Monitor.')
 
     return f'{risk}{detail} {threshold}'.strip()
 
@@ -997,7 +1107,8 @@ details.ac[open] > summary .chev{transform:rotate(90deg)}
 @media(max-width:680px){.two{grid-template-columns:1fr}}
 .pt{font-size:12px;font-weight:600;color:var(--text-m);text-transform:uppercase;
     letter-spacing:.5px;margin-bottom:10px}
-.chart-img{width:100%;height:auto;display:block}
+.chart-wrap{width:100%;overflow:hidden}
+.chart-wrap svg{width:100%;height:auto;display:block}
 /* Heatmap */
 .os{margin-top:20px}.ob{margin-bottom:20px}
 .oh{display:flex;align-items:center;gap:10px;margin-bottom:6px}
@@ -1041,6 +1152,9 @@ table.vt tr:last-child td{border-bottom:none}
 /* Footer */
 .rf{text-align:center;font-size:11px;color:var(--text-l);margin-top:30px;
     padding-top:16px;border-top:1px solid var(--grey-b)}
+/* Per-oligo detail row: Tm stats and 3-prime anchoring */
+.odetail{font-size:11px;color:var(--text-m);margin:2px 0 6px;padding-left:2px;line-height:1.5}
+.odetail strong{font-weight:600}
 """
 
 
@@ -1050,7 +1164,7 @@ def _html_head(title: str = 'PCR_strainer \u00b7 Assay Inclusivity Report') -> s
         '<meta charset="UTF-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
         '<meta http-equiv="Content-Security-Policy" '
-        'content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data:;">\n'
+        'content="default-src \'none\'; style-src \'unsafe-inline\';">\n'
         f'<title>{_esc(title)}</title>\n'
         f'<style>\n{_CSS}\n</style>\n'
         '</head>\n<body>\n<div class="page">\n'
@@ -1170,6 +1284,7 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
     pf_class    = ('c-pass'    if a['perc_detected'] >= thresholds['pass']
                    else 'c-caution' if a['perc_detected'] >= thresholds['caution']
                    else 'c-action')
+
     parts.append(
         f'<div class="mr">'
         f'<div class="met"><div class="ml">Inclusivity</div>'
@@ -1184,34 +1299,60 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
         f'</div>\n'
     )
 
-    # ── charts (base64 PNG) ──────────────────────────────────────────────────
-    err_png   = _err_chart_png(a['err_distribution'], status)
-    oligo_png = _oligo_chart_png(a['oligo_chart'])
+    # ── charts (inline SVG — vector, crisp at any resolution) ─────────────────
+    err_svg   = _err_chart_svg(a['err_distribution'], status)
+    oligo_svg = _oligo_chart_svg(a['oligo_chart'])
     parts.append(
-        f'<div class="two">'
-        f'<div><div class="pt">Error distribution</div>'
-        f'<img class="chart-img" src="data:image/png;base64,{err_png}" '
-        f'alt="Error distribution chart"></div>'
-        f'<div><div class="pt">Mismatch rate by oligo</div>'
-        f'<img class="chart-img" src="data:image/png;base64,{oligo_png}" '
-        f'alt="Mismatch rate by oligo chart"></div>'
-        f'</div>\n'
+        '<div class="two">'
+        '<div><div class="pt">Error distribution</div>'
+        '<div class="chart-wrap">' + err_svg + '</div></div>'
+        '<div><div class="pt">Mismatch rate by oligo</div>'
+        '<div class="chart-wrap">' + oligo_svg + '</div></div>'
+        '</div>\n'
     )
 
     # ── per-position heatmaps ────────────────────────────────────────────────
     parts.append('<div class="os"><div class="pt" style="margin-top:20px">'
                  'Per-position mismatch frequency</div>\n')
 
+    cs = a.get('clamp_stats')
+
     for ol in a['oligos']:
+        ts = ol.get('tm_stats')
+
+        # Build detail line: Tm range for all oligos;
+        # 3' clamp appended for the forward primer only.
+        detail_parts = []
+        if ts is not None:
+            detail_parts.append(
+                f'Tm &nbsp;<strong>{_esc(str(ts["min"]))}&#8211;'
+                f'{_esc(str(ts["max"]))}&deg;C</strong>'
+                f' &nbsp;(mean {_esc(str(ts["mean"]))}&deg;C)'
+            )
+        if ol['type'] == 'fwd_primer' and cs is not None:
+            clamp_col = '#C0392B' if cs['min'] < 2 else '#B07800' if cs['min'] < 3 else '#555'
+            detail_parts.append(
+                f'&nbsp;&nbsp;&middot;&nbsp;&nbsp;3\u2032 clamp &nbsp;'
+                f'<strong style="color:{clamp_col}">{_esc(str(cs["min"]))} bp min</strong>'
+                f' &nbsp;(range {_esc(str(cs["min"]))}&#8211;{_esc(str(cs["max"]))} bp,'
+                f' mean {_esc(str(cs["mean"]))} bp)'
+            )
+
+        detail_html = (
+            '<div class="odetail">' + ' '.join(detail_parts) + '</div>'
+            if detail_parts else ''
+        )
+
         parts.append(
             f'<div class="ob">'
-            f'<div class="oh">'
+            '<div class="oh">'
             f'{_oligo_tag(ol["type"])}'
             f'<span class="on">{_esc(ol["name"])}</span>'
             f'<span class="oseq">&nbsp;&middot;&nbsp;{_esc(ol["seq"])}</span>'
-            f'</div>'
-            f'<div class="ends"><span>5\'</span>'
-            f'<span style="flex:1"></span><span>3\'</span></div>'
+            '</div>'
+            + detail_html +
+            "<div class=\"ends\"><span>5'</span>"
+            "<span style=\"flex:1\"></span><span>3'</span></div>"
             + _heatmap_html(ol['seq'], ol['mm_pct']) +
             '</div>\n'
         )
@@ -1234,7 +1375,10 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
         '<div class="pt">Sequence variants at oligo binding sites</div>'
         '<table class="vt"><thead><tr>'
         '<th>Oligo</th><th>Variant sequence</th>'
-        '<th>Errors</th><th>Prevalence</th><th>Interpretation</th>'
+        '<th>Errors</th><th>Prevalence</th>'
+        '<th title="Melting temperature range across all detected genomes for this oligo">Tm (°C)</th>'
+        '<th title="Minimum exact-match run at 3′ end of forward primer (forward primer only)">3′ clamp</th>'
+        '<th>Interpretation</th>'
         '</tr></thead><tbody>\n'
     )
 
@@ -1246,8 +1390,40 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
                        '#B07800' if v['pct'] >= 5  else '#555')
             row_bg  = ' style="background:#FEF2F0"' if v['pct'] >= 15 else ''
             fw      = '600' if v['pct'] >= 5 else '400'
-            interp  = _interpret_variant(ol['seq'], v['seq'], v['pct'], ol['type'])
             bar_w   = min(v['pct'] * 3, 100)
+
+            # Tm cell: per-variant stats from the specific genomes with this sequence
+            v_ts = v.get('tm_stats')
+            if v_ts is not None:
+                tm_cell = (
+                    f'<span style="white-space:nowrap">'
+                    f'{_esc(str(v_ts["min"]))}&#8211;{_esc(str(v_ts["max"]))}'
+                    f'</span><br><span style="color:var(--text-l);font-size:10px">'
+                    f'mean {_esc(str(v_ts["mean"]))}'
+                    f'</span>'
+                )
+            else:
+                tm_cell = '&mdash;'
+
+            # Clamp cell: fwd primer only, from the specific genomes with this variant
+            v_cs = v.get('clamp_stats')
+            if v_cs is not None:
+                clamp_col = ('#C0392B' if v_cs['min'] < 2 else
+                             '#B07800' if v_cs['min'] < 3 else 'var(--text-m)')
+                clamp_cell = (
+                    f'<span style="color:{clamp_col};white-space:nowrap">'
+                    f'{_esc(str(v_cs["min"]))}&#8211;{_esc(str(v_cs["max"]))} bp'
+                    f'</span><br><span style="color:var(--text-l);font-size:10px">'
+                    f'mean {_esc(str(v_cs["mean"]))} bp'
+                    f'</span>'
+                )
+            else:
+                clamp_cell = '&mdash;'
+
+            interp = _interpret_variant(
+                ol['seq'], v['seq'], v['pct'], ol['type'],
+                tm_stats=v_ts, clamp_stats=v_cs)
+
             parts.append(
                 f'<tr{row_bg}>'
                 f'<td>{_oligo_tag(ol["type"])}</td>'
@@ -1257,13 +1433,15 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
                 f'{_fmt_pct(v["pct"])} ({_fmt_n(v["count"])} genomes)</span>'
                 f'<div class="vb2"><div class="vbf" '
                 f'style="width:{bar_w:.1f}%;background:{var_col}"></div></div></td>'
+                f'<td style="font-size:11px">{tm_cell}</td>'
+                f'<td style="font-size:11px">{clamp_cell}</td>'
                 f'<td style="font-size:11px;color:var(--text-m)">{_esc(interp)}</td>'
                 f'</tr>\n'
             )
 
     if not has_variants:
         parts.append(
-            '<tr><td colspan="5" style="text-align:center;'
+            '<tr><td colspan="7" style="text-align:center;'
             'color:var(--text-l);padding:14px">'
             'No variants above reporting threshold</td></tr>\n'
         )
@@ -1294,7 +1472,7 @@ def _html_footer(pv: dict) -> str:
 def render_html(report_data: dict) -> str:
     """
     Generate a complete, self-contained, JavaScript-free HTML report.
-    Charts are rendered by matplotlib and embedded as base64 PNG images.
+    Charts are rendered by matplotlib as inline SVG (vector, crisp at any resolution).
     """
     pv         = report_data['provenance']
     thresholds = report_data['thresholds']

@@ -170,6 +170,7 @@ assay_name,fwd_primer_name,fwd_primer_seq,rev_primer_name,rev_primer_seq
 - IUPAC degenerate bases are permitted (A T G C W S M K R Y B V D H N)
 - FASTA headers in the reference genome file must be unique
 - Assay names and all oligo names must be unique across the entire file
+- Assay names are also used to derive temporary/output filenames. They may contain spaces and punctuation, but assay names that normalize to the same filename stem are rejected. In practice, avoid names that differ only by spaces or punctuation (for example `Assay-1` and `Assay 1`).
 
 **Example:**
 ```
@@ -185,6 +186,7 @@ FluA_RP1,FIuA-RP1-F,ATGCMKRYW,FIuA-RP1-R,CAGCATCGTCAG
 PCR_strainer expects DNA sequences in FASTA format.
 
 - FASTA headers must be unique and must not contain spaces
+- No additional FASTA header restrictions are imposed for execution. Headers are written verbatim in the analysis outputs, except that TSV exports neutralize leading spreadsheet formula characters (`=`, `+`, `-`, `@`) for safer opening in Excel/LibreOffice.
 - For single-stranded RNA genomes (influenza, SARS-CoV-2, etc.), ensure all sequences represent the same strand sense (e.g. all coding/positive sense)
 - TNTBLAST does not expand degenerate nucleotides in subject sequences. Sequences with degenerate bases in primer binding sites may produce false negatives; consider filtering these out before running
 
@@ -195,6 +197,8 @@ PCR_strainer expects DNA sequences in FASTA format.
 ## Output files
 
 PCR_strainer writes five output files per run, all sharing the prefix given to `-o`.
+
+For spreadsheet safety, text fields that begin with `=`, `+`, `-`, or `@` are prefixed with a leading apostrophe in the TSV outputs. Spreadsheet applications will display the original text while treating it as literal data rather than a formula.
 
 | File | Description |
 |---|---|

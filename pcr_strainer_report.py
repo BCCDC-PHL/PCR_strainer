@@ -251,10 +251,19 @@ _OLIGO_SEQ_RE  = re.compile(r'^[ATGCWSMKRYBVDHNatgcwsmkrybvdhn()\-]+$')
 _OLIGO_NAME_RE = re.compile(r'^[\w\s\-_./:]{1,200}$')
 _MAX_OLIGO_LEN  = 200
 _MAX_NAME_LEN   = 200
+_SPREADSHEET_FORMULA_PREFIXES = ('=', '+', '-', '@')
+
+
+def _unsanitise_spreadsheet_text(s: object) -> object:
+    """Undo TSV spreadsheet-safety escaping when reading back our own outputs."""
+    if isinstance(s, str) and len(s) >= 2 and s[0] == "'" and s[1] in _SPREADSHEET_FORMULA_PREFIXES:
+        return s[1:]
+    return s
 
 
 def _sanitise_seq(s: str, field: str = 'sequence') -> str:
     """Validate a nucleotide sequence; return empty string if invalid."""
+    s = _unsanitise_spreadsheet_text(s)
     if not isinstance(s, str):
         return ''
     s = s.strip()
@@ -271,6 +280,7 @@ def _sanitise_seq(s: str, field: str = 'sequence') -> str:
 
 def _sanitise_name(s: str, field: str = 'name') -> str:
     """Validate a name string; strip dangerous characters if suspicious."""
+    s = _unsanitise_spreadsheet_text(s)
     if not isinstance(s, str):
         return '(unknown)'
     s = s.strip()[:_MAX_NAME_LEN]
@@ -527,9 +537,12 @@ def build_report_data(
                 missed_high_n_pct = round(
                     len(ms_a[ms_a['perc_Ns'] > 5]) * 100.0 / len(ms_a), 1)
 
+        pcr_a = (pcr[pcr['assay_name'] == assay_name]
+                 if not pcr.empty and 'assay_name' in pcr.columns
+                 else pd.DataFrame())
+
         oligo_mm_any: Dict[str, float] = {}
-        if not pcr.empty and 'assay_name' in pcr.columns:
-            pcr_a = pcr[pcr['assay_name'] == assay_name]
+        if not pcr_a.empty:
             n_det = len(pcr_a)
             for oligo in ('fwd_primer', 'rev_primer', 'probe'):
                 err_col = f'{oligo}_errors'
@@ -549,22 +562,32 @@ def build_report_data(
         oligos_out: List[dict] = []
 
         for oligo in ('fwd_primer', 'rev_primer', 'probe'):
-            pos_data = per_pos.get(assay_name, {}).get(oligo)
-            if pos_data is None:
-                continue
-
-            any_mm_pct = oligo_mm_any.get(oligo, 0.0)
-            oligo_chart_labels.append(oligo_labels[oligo])
-            oligo_chart_values.append(any_mm_pct)
-
-            # PCR results rows for this assay/oligo — used to look up per-variant Tm
+            seq_col  = f'{oligo}_seq'
+            name_col = f'{oligo}_name'
             site_col = f'{oligo}_site_seq'
             tm_col   = f'{oligo}_tm'
-            pcr_assay = (pcr[pcr['assay_name'] == assay_name]
-                         if not pcr.empty and 'assay_name' in pcr.columns
-                         else pd.DataFrame())
+            pos_data = per_pos.get(assay_name, {}).get(oligo)
 
+            raw_seq = ''
+            if seq_col in pcr_a.columns:
+                seq_vals = pcr_a[seq_col].dropna().unique()
+                if len(seq_vals) > 0:
+                    raw_seq = str(seq_vals[0])
+            if raw_seq == '':
+                continue
+
+            raw_name = oligo
+            if name_col in pcr_a.columns and not pcr_a[name_col].dropna().empty:
+                raw_name = str(pcr_a[name_col].dropna().iloc[0])
+
+            oligo_name = _sanitise_name(raw_name, f'{assay_name}/{oligo} name')
+            oligo_seq = _sanitise_seq(raw_seq, f'{assay_name}/{oligo} seq')
+            any_mm_pct = oligo_mm_any.get(oligo, 0.0)
             variants_out: List[dict] = []
+            omitted_variants = 0
+            available = bool(oligo_seq)
+            omission_reason: Optional[str] = None
+
             if not vr_a.empty and 'oligo' in vr_a.columns:
                 vr_ol = vr_a[vr_a['oligo'] == oligo].copy()
                 if not vr_ol.empty and 'target_count' in vr_ol.columns:
@@ -574,14 +597,15 @@ def build_report_data(
                         str(vrow.get('oligo_site_variant', '')),
                         f'{assay_name}/{oligo} variant')
                     if not variant_seq:
+                        omitted_variants += 1
                         continue
 
                     # Tm distribution for the genomes that carry this specific variant
                     v_tm_stats: Optional[dict] = None
-                    if (not pcr_assay.empty
-                            and site_col in pcr_assay.columns
-                            and tm_col   in pcr_assay.columns):
-                        v_rows  = pcr_assay[pcr_assay[site_col] == variant_seq]
+                    if (not pcr_a.empty
+                            and site_col in pcr_a.columns
+                            and tm_col   in pcr_a.columns):
+                        v_rows  = pcr_a[pcr_a[site_col] == variant_seq]
                         v_tm_vals = pd.to_numeric(v_rows[tm_col], errors='coerce').dropna()
                         if not v_tm_vals.empty:
                             v_tm_stats = {
@@ -600,13 +624,37 @@ def build_report_data(
                         'tm_stats':    v_tm_stats,
                     })
 
+            if not available:
+                omission_reason = ('Oligo sequence could not be rendered in the report '
+                                   'because it contains unsupported characters after input validation.')
+                oligos_out.append({
+                    'type':             oligo,
+                    'label':            oligo_labels[oligo],
+                    'name':             oligo_name,
+                    'seq':              str(_unsanitise_spreadsheet_text(raw_seq)),
+                    'available':        False,
+                    'any_mm_pct':       any_mm_pct,
+                    'mm_pct':           [],
+                    'variants':         [],
+                    'tm_stats':         None,
+                    'omitted_variants': omitted_variants,
+                    'omission_reason':  omission_reason,
+                })
+                continue
+
+            mm_pct = pos_data['mm_pct'] if pos_data is not None else [0.0] * len(oligo_seq)
+            if pos_data is None:
+                omission_reason = ('Per-position mismatch data were unavailable for this oligo, '
+                                   'so the heatmap could not be generated.')
+
+            oligo_chart_labels.append(oligo_labels[oligo])
+            oligo_chart_values.append(any_mm_pct)
+
             # Tm statistics across detected genomes for this oligo
-            tm_col  = f'{oligo}_tm'
             tm_stats: Optional[dict] = None
-            if not pcr.empty and 'assay_name' in pcr.columns:
-                pcr_a_oligo = pcr[pcr['assay_name'] == assay_name]
-                if tm_col in pcr_a_oligo.columns:
-                    tm_vals = pd.to_numeric(pcr_a_oligo[tm_col], errors='coerce').dropna()
+            if not pcr_a.empty:
+                if tm_col in pcr_a.columns:
+                    tm_vals = pd.to_numeric(pcr_a[tm_col], errors='coerce').dropna()
                     if not tm_vals.empty:
                         tm_stats = {
                             'min':  round(float(tm_vals.min()),  1),
@@ -615,14 +663,17 @@ def build_report_data(
                         }
 
             oligos_out.append({
-                'type':       oligo,
-                'label':      oligo_labels[oligo],
-                'name':       pos_data['name'],
-                'seq':        pos_data['seq'],
-                'any_mm_pct': any_mm_pct,
-                'mm_pct':     pos_data['mm_pct'],
-                'variants':   variants_out,
-                'tm_stats':   tm_stats,
+                'type':             oligo,
+                'label':            oligo_labels[oligo],
+                'name':             pos_data['name'] if pos_data is not None else oligo_name,
+                'seq':              pos_data['seq'] if pos_data is not None else oligo_seq,
+                'available':        True,
+                'any_mm_pct':       any_mm_pct,
+                'mm_pct':           mm_pct,
+                'variants':         variants_out,
+                'tm_stats':         tm_stats,
+                'omitted_variants': omitted_variants,
+                'omission_reason':  omission_reason,
             })
 
         peak_oligo: Optional[str] = None
@@ -1115,6 +1166,9 @@ details.ac[open] > summary .chev{transform:rotate(90deg)}
     letter-spacing:.5px}
 .mv{font-size:22px;font-weight:600;margin-top:2px}
 .ms2{font-size:11px;color:var(--text-l);margin-top:2px}
+.warn{margin:12px 0 0;background:#FFF8E1;border:1px solid #E5C96B;border-radius:8px;
+      padding:10px 12px;font-size:12px;color:#6B4E00}
+.warn strong{font-weight:700}
 /* Charts */
 .two{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:20px}
 @media(max-width:680px){.two{grid-template-columns:1fr}}
@@ -1345,6 +1399,25 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
             if detail_parts else ''
         )
 
+        warn_parts = []
+        if ol.get('omission_reason'):
+            warn_parts.append(_esc(str(ol['omission_reason'])))
+        if ol.get('omitted_variants', 0) > 0:
+            warn_parts.append(
+                f'{_fmt_n(int(ol["omitted_variants"]))} variant row(s) for this oligo '
+                'were omitted from the table below due to unsupported characters.'
+            )
+        warn_html = (
+            '<div class="warn"><strong>Report note:</strong> '
+            + ' '.join(warn_parts) + '</div>'
+            if warn_parts else ''
+        )
+
+        heatmap_html = (_heatmap_html(ol['seq'], ol['mm_pct'])
+                        if ol.get('available', True)
+                        else '<div class="warn"><strong>Heatmap unavailable:</strong> '
+                             'this oligo could not be rendered safely from the current input.</div>')
+
         parts.append(
             f'<div class="ob">'
             '<div class="oh">'
@@ -1353,9 +1426,10 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
             f'<span class="oseq">&nbsp;&middot;&nbsp;{_esc(ol["seq"])}</span>'
             '</div>'
             + detail_html +
+            warn_html +
             "<div class=\"ends\"><span>5'</span>"
             "<span style=\"flex:1\"></span><span>3'</span></div>"
-            + _heatmap_html(ol['seq'], ol['mm_pct']) +
+            + heatmap_html +
             '</div>\n'
         )
 
@@ -1426,6 +1500,18 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
                 f'<td style="font-size:11px">{tm_cell}</td>'
                 f'<td style="font-size:11px;color:var(--text-m)">{_esc(interp)}</td>'
                 f'</tr>\n'
+            )
+
+        if ol.get('omitted_variants', 0) > 0:
+            has_variants = True
+            parts.append(
+                '<tr style="background:#FFF8E1">'
+                f'<td>{_oligo_tag(ol["type"])}</td>'
+                '<td colspan="5" style="font-size:11px;color:#6B4E00">'
+                f'{_fmt_n(int(ol["omitted_variants"]))} variant row(s) were omitted for this oligo '
+                'because the report parser encountered unsupported characters. '
+                'Review the log output and the TSV files before interpreting absence from this table as a clean result.'
+                '</td></tr>\n'
             )
 
     if not has_variants:

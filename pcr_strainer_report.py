@@ -591,22 +591,6 @@ def build_report_data(
                             }
 
                     # 3' clamp distribution for genomes carrying this variant
-                    # (forward primer only — clamp is a fwd primer property)
-                    v_clamp_stats: Optional[dict] = None
-                    if (oligo == 'fwd_primer'
-                            and not pcr_assay.empty
-                            and site_col in pcr_assay.columns
-                            and 'min_3prime_clamp' in pcr_assay.columns):
-                        v_rows_c = pcr_assay[pcr_assay[site_col] == variant_seq]
-                        v_clamp_vals = pd.to_numeric(
-                            v_rows_c['min_3prime_clamp'], errors='coerce').dropna()
-                        if not v_clamp_vals.empty:
-                            v_clamp_stats = {
-                                'min':  int(v_clamp_vals.min()),
-                                'mean': round(float(v_clamp_vals.mean()), 1),
-                                'max':  int(v_clamp_vals.max()),
-                            }
-
                     variants_out.append({
                         'seq':         variant_seq,
                         'errors':      int(vrow['oligo_errors'])        if pd.notna(vrow.get('oligo_errors'))      else 0,
@@ -614,7 +598,6 @@ def build_report_data(
                         'pct':         round(float(vrow['perc_of_detected']), 1)
                                        if pd.notna(vrow.get('perc_of_detected')) else 0.0,
                         'tm_stats':    v_tm_stats,
-                        'clamp_stats': v_clamp_stats,
                     })
 
             # Tm statistics across detected genomes for this oligo
@@ -642,18 +625,6 @@ def build_report_data(
                 'tm_stats':   tm_stats,
             })
 
-        # 3' clamp statistics across detected genomes for this assay
-        clamp_stats: Optional[dict] = None
-        if not pcr.empty and 'assay_name' in pcr.columns and 'min_3prime_clamp' in pcr.columns:
-            pcr_a_clamp = pcr[pcr['assay_name'] == assay_name]
-            clamp_vals  = pd.to_numeric(pcr_a_clamp['min_3prime_clamp'], errors='coerce').dropna()
-            if not clamp_vals.empty:
-                clamp_stats = {
-                    'min':  int(clamp_vals.min()),
-                    'mean': round(float(clamp_vals.mean()), 1),
-                    'max':  int(clamp_vals.max()),
-                }
-
         peak_oligo: Optional[str] = None
         peak_pct   = 0.0
         peak_pos: Optional[int]  = None
@@ -666,11 +637,70 @@ def build_report_data(
                     peak_pos   = ol['mm_pct'].index(mx) + 1
 
         status = _status(perc_detected, pass_t, caution_t)
+
+        # Upgrade pass → caution if any oligo mismatch rate >= OLIGO_ACTION
         if status == 'pass' and any(v >= OLIGO_ACTION for v in oligo_mm_any.values()):
             status = 'caution'
 
+        # Upgrade caution → action if a high-prevalence variant is:
+#   • within the last 3 bp of the primer/probe (near-3' — likely to
+#     block Taq extension or disrupt probe hybridisation), OR
+#   • carries 2+ errors (double mismatch substantially reduces binding)
+        _action_reason: Optional[str] = None
+        for ol in oligos_out:
+            n_ol = len(ol['seq'])
+            for v in ol['variants']:
+                if v['pct'] < OLIGO_ACTION:
+                    continue
+                mm_pos_list: List[int] = []
+                op = 0
+                for ch in v['seq']:
+                    if ch == '(':
+                        continue
+                    if ch == '-' or ch.islower():
+                        mm_pos_list.append(op)
+                    if ch != '(':
+                        op += 1
+                near_3prime = any(p >= n_ol - 3 for p in mm_pos_list)
+                multi_error = v['errors'] >= 2
+                if near_3prime or multi_error:
+                    status = 'action'
+                    reasons = []
+                    if near_3prime:
+                        reasons.append('within the last 3 bp of the 3′ end')
+                    if multi_error:
+                        reasons.append(f'{v["errors"]} errors')
+                    _action_reason = (
+                        f'{v["pct"]:.1f}% of detected genomes carry a '
+                        f'{ol["label"].lower()} variant with '
+                        + ' and '.join(reasons) +
+                        '. This is likely to cause amplification failure '
+                        'in affected samples.'
+                    )
+                    break
+            if _action_reason:
+                break
+
         action_msg: Optional[str] = None
-        if status in ('caution', 'action'):
+        if status == 'action':
+            if _action_reason:
+                action_msg = _action_reason
+            elif oligo_mm_any:
+                worst  = max(oligo_mm_any, key=oligo_mm_any.get)   # type: ignore[arg-type]
+                wpct   = oligo_mm_any[worst]
+                wlabel = oligo_labels.get(worst, worst)
+                action_msg = (
+                    f'{wpct:.1f}% of detected genomes have at least one mismatch '
+                    f'in the {wlabel.lower()}. Review the per-position heatmap '
+                    f'and variant table before continued clinical use.'
+                )
+            else:
+                action_msg = (
+                    f'Overall inclusivity is {perc_detected:.1f}%. '
+                    f'Review the missed sequences report to determine whether this '
+                    f'reflects genuine assay failure or poor reference genome quality.'
+                )
+        elif status == 'caution':
             if oligo_mm_any:
                 worst  = max(oligo_mm_any, key=oligo_mm_any.get)   # type: ignore[arg-type]
                 wpct   = oligo_mm_any[worst]
@@ -704,7 +734,6 @@ def build_report_data(
             'peak_oligo':        peak_oligo,
             'peak_pct':          round(peak_pct, 1),
             'peak_pos':          peak_pos,
-            'clamp_stats':       clamp_stats,
         })
 
     overall   = _overall_status(assays_data) if assays_data else 'pass'
@@ -937,15 +966,12 @@ def _variant_seq_html(seq: str) -> str:
 
 def _interpret_variant(oligo_seq: str, var_seq: str,
                        pct: float, oligo_type: str,
-                       tm_stats: Optional[dict] = None,
-                       clamp_stats: Optional[dict] = None) -> str:
+                       tm_stats: Optional[dict] = None) -> str:
     """
     Plain-text interpretation of a variant for the variants table.
 
     tm_stats    : {'min': float, 'mean': float, 'max': float} for this oligo,
                   or None if not available.
-    clamp_stats : {'min': int, 'mean': float, 'max': int} for the forward primer,
-                  or None (always None for rev primer / probe).
     """
     mm_pos = []
     oligo_pos = 0
@@ -961,18 +987,14 @@ def _interpret_variant(oligo_seq: str, var_seq: str,
     is3prime = any(p >= n - 5 for p in mm_pos)
     is5prime = all(p < 5      for p in mm_pos) if mm_pos else False
     is_probe = oligo_type == 'probe'
-    is_fwd   = oligo_type == 'fwd_primer'
 
     # ── Risk level ────────────────────────────────────────────────────────────
-    # Elevated by 3′ position, low clamp, or borderline Tm
-    low_clamp = clamp_stats is not None and clamp_stats['min'] < 3
-    low_tm    = tm_stats    is not None and tm_stats['min'] < 50
+    low_tm = tm_stats is not None and tm_stats['min'] < 50
 
     risk_score = 0
     if pct >= 15:                      risk_score += 2
     elif pct >= 5:                     risk_score += 1
     if is3prime and not is_probe:      risk_score += 1
-    if low_clamp and is_fwd:           risk_score += 1
 
     if risk_score >= 3:
         risk = 'HIGH RISK. '
@@ -1000,15 +1022,6 @@ def _interpret_variant(oligo_seq: str, var_seq: str,
         elif is3prime and tm_stats['min'] < 55:
             detail += (f' Min Tm {tm_stats["min"]}\u00b0C — 3\u2032 mismatch'
                        f' may cause further Tm depression in affected genomes.')
-
-    # ── 3′ clamp note (fwd primer only) ──────────────────────────────────────
-    if clamp_stats is not None and is_fwd:
-        if clamp_stats['min'] < 2:
-            detail += (f' 3\u2032 clamp as low as {clamp_stats["min"]} bp —'
-                       f' very weak anchoring; Taq extension may fail.')
-        elif clamp_stats['min'] < 3:
-            detail += (f' 3\u2032 clamp min {clamp_stats["min"]} bp —'
-                       f' marginal anchoring; monitor for reduced sensitivity.')
 
     # ── Urgency ───────────────────────────────────────────────────────────────
     threshold = ('Urgent review.'        if pct >= 20 else
@@ -1315,27 +1328,16 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
     parts.append('<div class="os"><div class="pt" style="margin-top:20px">'
                  'Per-position mismatch frequency</div>\n')
 
-    cs = a.get('clamp_stats')
-
     for ol in a['oligos']:
         ts = ol.get('tm_stats')
 
-        # Build detail line: Tm range for all oligos;
-        # 3' clamp appended for the forward primer only.
+        # Build detail line: Tm range for this oligo
         detail_parts = []
         if ts is not None:
             detail_parts.append(
                 f'Tm &nbsp;<strong>{_esc(str(ts["min"]))}&#8211;'
                 f'{_esc(str(ts["max"]))}&deg;C</strong>'
                 f' &nbsp;(mean {_esc(str(ts["mean"]))}&deg;C)'
-            )
-        if ol['type'] == 'fwd_primer' and cs is not None:
-            clamp_col = '#C0392B' if cs['min'] < 2 else '#B07800' if cs['min'] < 3 else '#555'
-            detail_parts.append(
-                f'&nbsp;&nbsp;&middot;&nbsp;&nbsp;3\u2032 clamp &nbsp;'
-                f'<strong style="color:{clamp_col}">{_esc(str(cs["min"]))} bp min</strong>'
-                f' &nbsp;(range {_esc(str(cs["min"]))}&#8211;{_esc(str(cs["max"]))} bp,'
-                f' mean {_esc(str(cs["mean"]))} bp)'
             )
 
         detail_html = (
@@ -1377,7 +1379,6 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
         '<th>Oligo</th><th>Variant sequence</th>'
         '<th>Errors</th><th>Prevalence</th>'
         '<th title="Melting temperature range across all detected genomes for this oligo">Tm (°C)</th>'
-        '<th title="Minimum exact-match run at 3′ end of forward primer (forward primer only)">3′ clamp</th>'
         '<th>Interpretation</th>'
         '</tr></thead><tbody>\n'
     )
@@ -1392,37 +1393,26 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
             fw      = '600' if v['pct'] >= 5 else '400'
             bar_w   = min(v['pct'] * 3, 100)
 
-            # Tm cell: per-variant stats from the specific genomes with this sequence
+            # Tm cell: single value when all genomes share the same Tm, range otherwise
             v_ts = v.get('tm_stats')
             if v_ts is not None:
-                tm_cell = (
-                    f'<span style="white-space:nowrap">'
-                    f'{_esc(str(v_ts["min"]))}&#8211;{_esc(str(v_ts["max"]))}'
-                    f'</span><br><span style="color:var(--text-l);font-size:10px">'
-                    f'mean {_esc(str(v_ts["mean"]))}'
-                    f'</span>'
-                )
+                if v_ts['min'] == v_ts['max']:
+                    tm_cell = _esc(str(v_ts['min']))
+                else:
+                    tm_cell = (
+                        f'<span style="white-space:nowrap">'
+                        f'{_esc(str(v_ts["min"]))}&#8211;{_esc(str(v_ts["max"]))}'
+                        f'</span><br><span style="color:var(--text-l);font-size:10px">'
+                        f'mean {_esc(str(v_ts["mean"]))}'
+                        f'</span>'
+                    )
             else:
                 tm_cell = '&mdash;'
 
-            # Clamp cell: fwd primer only, from the specific genomes with this variant
-            v_cs = v.get('clamp_stats')
-            if v_cs is not None:
-                clamp_col = ('#C0392B' if v_cs['min'] < 2 else
-                             '#B07800' if v_cs['min'] < 3 else 'var(--text-m)')
-                clamp_cell = (
-                    f'<span style="color:{clamp_col};white-space:nowrap">'
-                    f'{_esc(str(v_cs["min"]))}&#8211;{_esc(str(v_cs["max"]))} bp'
-                    f'</span><br><span style="color:var(--text-l);font-size:10px">'
-                    f'mean {_esc(str(v_cs["mean"]))} bp'
-                    f'</span>'
-                )
-            else:
-                clamp_cell = '&mdash;'
 
             interp = _interpret_variant(
                 ol['seq'], v['seq'], v['pct'], ol['type'],
-                tm_stats=v_ts, clamp_stats=v_cs)
+                tm_stats=v_ts)
 
             parts.append(
                 f'<tr{row_bg}>'
@@ -1434,14 +1424,13 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
                 f'<div class="vb2"><div class="vbf" '
                 f'style="width:{bar_w:.1f}%;background:{var_col}"></div></div></td>'
                 f'<td style="font-size:11px">{tm_cell}</td>'
-                f'<td style="font-size:11px">{clamp_cell}</td>'
                 f'<td style="font-size:11px;color:var(--text-m)">{_esc(interp)}</td>'
                 f'</tr>\n'
             )
 
     if not has_variants:
         parts.append(
-            '<tr><td colspan="7" style="text-align:center;'
+            '<tr><td colspan="6" style="text-align:center;'
             'color:var(--text-l);padding:14px">'
             'No variants above reporting threshold</td></tr>\n'
         )

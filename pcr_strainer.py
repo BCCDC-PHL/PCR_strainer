@@ -58,7 +58,10 @@ def sanitize_spreadsheet_cell(value):
 
 def sanitize_spreadsheet_dataframe(df):
     """Sanitize all text cells before writing tabular output for spreadsheet use."""
-    return df.applymap(sanitize_spreadsheet_cell)
+    sanitized = df.copy()
+    for col in sanitized.columns:
+        sanitized[col] = sanitized[col].map(sanitize_spreadsheet_cell)
+    return sanitized
 
 
 def main():

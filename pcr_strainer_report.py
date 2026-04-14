@@ -291,6 +291,37 @@ def _sanitise_name(s: str, field: str = 'name') -> str:
     return s
 
 
+def _count_threshold_omitted_variants(
+        pcr_a: pd.DataFrame,
+        oligo: str,
+        detected_targets: int,
+        threshold: Optional[float],
+) -> int:
+    """Count unique non-zero-error site variants omitted solely by prevalence threshold."""
+    if threshold in (None, 0) or pcr_a.empty or detected_targets <= 0:
+        return 0
+
+    site_col = f'{oligo}_site_seq'
+    err_col = f'{oligo}_errors'
+    if site_col not in pcr_a.columns or err_col not in pcr_a.columns:
+        return 0
+
+    rows = pcr_a[[site_col, err_col]].dropna().copy()
+    if rows.empty:
+        return 0
+
+    rows[site_col] = rows[site_col].map(_unsanitise_spreadsheet_text)
+    rows[site_col] = rows[site_col].astype(str)
+    rows[err_col] = pd.to_numeric(rows[err_col], errors='coerce')
+    rows = rows[rows[err_col] > 0]
+    if rows.empty:
+        return 0
+
+    grouped = rows.groupby([site_col, err_col]).size().reset_index(name='target_count')
+    grouped['pct_of_detected'] = grouped['target_count'] * 100.0 / detected_targets
+    return int((grouped['pct_of_detected'] < float(threshold)).sum())
+
+
 # ── Degenerate base handling ──────────────────────────────────────────────────
 #
 # PCR_strainer's write_oligo_site_variant() does a character-by-character
@@ -585,6 +616,8 @@ def build_report_data(
             any_mm_pct = oligo_mm_any.get(oligo, 0.0)
             variants_out: List[dict] = []
             omitted_variants = 0
+            threshold_omitted_variants = _count_threshold_omitted_variants(
+                pcr_a, oligo, detected_targets, config.variant_threshold)
             available = bool(oligo_seq)
             omission_reason: Optional[str] = None
 
@@ -638,6 +671,7 @@ def build_report_data(
                     'variants':         [],
                     'tm_stats':         None,
                     'omitted_variants': omitted_variants,
+                    'threshold_omitted_variants': threshold_omitted_variants,
                     'omission_reason':  omission_reason,
                 })
                 continue
@@ -673,6 +707,7 @@ def build_report_data(
                 'variants':         variants_out,
                 'tm_stats':         tm_stats,
                 'omitted_variants': omitted_variants,
+                'threshold_omitted_variants': threshold_omitted_variants,
                 'omission_reason':  omission_reason,
             })
 
@@ -1407,6 +1442,11 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
                 f'{_fmt_n(int(ol["omitted_variants"]))} variant row(s) for this oligo '
                 'were omitted from the table below due to unsupported characters.'
             )
+        if ol.get('threshold_omitted_variants', 0) > 0:
+            warn_parts.append(
+                f'{_fmt_n(int(ol["threshold_omitted_variants"]))} additional non-zero-error variant row(s) '
+                'for this oligo were omitted because they fell below the reporting threshold.'
+            )
         warn_html = (
             '<div class="warn"><strong>Report note:</strong> '
             + ' '.join(warn_parts) + '</div>'
@@ -1511,6 +1551,17 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
                 f'{_fmt_n(int(ol["omitted_variants"]))} variant row(s) were omitted for this oligo '
                 'because the report parser encountered unsupported characters. '
                 'Review the log output and the TSV files before interpreting absence from this table as a clean result.'
+                '</td></tr>\n'
+            )
+
+        if ol.get('threshold_omitted_variants', 0) > 0:
+            has_variants = True
+            parts.append(
+                '<tr style="background:#F5F5F5">'
+                f'<td>{_oligo_tag(ol["type"])}</td>'
+                '<td colspan="5" style="font-size:11px;color:var(--text-m)">'
+                f'{_fmt_n(int(ol["threshold_omitted_variants"]))} additional non-zero-error variant row(s) '
+                'for this oligo were present in the full PCR results but are not shown here because they were below the configured reporting threshold.'
                 '</td></tr>\n'
             )
 

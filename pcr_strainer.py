@@ -2,10 +2,10 @@
 
 # PCR_strainer - A tool for assessing inclusivity of PCR primers and probes against reference nucleotide sequences
 #
-# Original Author: Kevin Kuchinski
-# Further developed for operational use: James Zlosnik/BCCDC-PHL
+# Kevin Kuchinski
 # British Columbia Centre for Disease Control, Public Health Laboratory
 # University of British Columbia, Department of Pathology and Laboratory Medicine
+# kevin.kuchinski@bccdc.ca
 
 # Version is stored here at module level — a single source of truth.
 # Do not encode the version in the filename; use git tags for releases:
@@ -15,53 +15,8 @@ __version__ = '0.2.5'
 import sys
 import subprocess
 import os
-import re
 import numpy as np
 import pandas as pd
-
-
-_SPREADSHEET_FORMULA_PREFIXES = ('=', '+', '-', '@')
-
-
-def safe_filename_token(value, field_name='name'):
-    """Convert user-provided labels into a filesystem-safe token."""
-    if not isinstance(value, str):
-        print(f'\nERROR: {field_name} must be text.\n')
-        exit(1)
-    value = value.strip()
-    if value == '':
-        print(f'\nERROR: {field_name} cannot be empty.\n')
-        exit(1)
-    if any(ord(char) < 32 for char in value):
-        print(f'\nERROR: {field_name} cannot contain control characters.\n')
-        exit(1)
-    token = re.sub(r'\s+', '_', value)
-    token = re.sub(r'[^A-Za-z0-9._-]', '_', token)
-    token = re.sub(r'_+', '_', token).strip('._')
-    if token == '':
-        print(f'\nERROR: {field_name} must contain at least one filename-safe character.\n')
-        exit(1)
-    return token
-
-
-def assay_file_stem(assay_name):
-    """Create a deterministic safe filename stem for assay-specific temp files."""
-    return safe_filename_token(assay_name, 'assay name')
-
-
-def sanitize_spreadsheet_cell(value):
-    """Neutralize spreadsheet formulas while preserving the displayed text."""
-    if isinstance(value, str) and value[:1] in _SPREADSHEET_FORMULA_PREFIXES:
-        return "'" + value
-    return value
-
-
-def sanitize_spreadsheet_dataframe(df):
-    """Sanitize all text cells before writing tabular output for spreadsheet use."""
-    sanitized = df.copy()
-    for col in sanitized.columns:
-        sanitized[col] = sanitized[col].map(sanitize_spreadsheet_cell)
-    return sanitized
 
 
 def main():
@@ -92,6 +47,7 @@ def main():
     write_variant_report(name, out_path, final_tntblast_results, args['-g'], args['-t'])
     write_missed_seqs_report(name, out_path, final_tntblast_results, args['-g'])
     write_tntblast_results(name, out_path, final_tntblast_results)
+    write_amplicon_fasta(name, out_path, final_tntblast_results)
     # Write HTML summary report
     try:
         from pcr_strainer_report import write_html_report
@@ -222,7 +178,7 @@ def read_assay_file(path_to_file):
         print(f'\nERROR: Assay CSV file {path_to_file} is empty.\n')
         exit(1)
     assays = []
-    with open(path_to_file, 'r') as input_file:
+    with open(path_to_file, 'r', encoding='utf-8-sig') as input_file:
         for line in input_file:
             line = line.rstrip().split(',')
             # Check if line has the accepted number of comma-separated values
@@ -269,11 +225,6 @@ def read_assay_file(path_to_file):
         if len(names) != len(set(names)):
             print('\nERROR: Assay and oligo names must be unique!\n')
             exit()
-    assay_stems = [assay_file_stem(assay[0]) for assay in assays]
-    if len(assay_stems) != len(set(assay_stems)):
-        print('\nERROR: Assay names must remain unique after filename normalization.\n')
-        print('Please rename assays so they do not differ only by spaces or punctuation.\n')
-        exit(1)
     return tuple(assays)
 
 
@@ -288,29 +239,18 @@ def run_TNTBLAST(assay_details, path_to_genomes, path_to_output, melting_temp, p
     print(f'Fwd primer seq: {fwd_primer_seq}\nRev primer seq: {rev_primer_seq}')
     if probe_seq != '':
         print(f'Probe seq: {probe_seq}')
-    assay_stem = assay_file_stem(assay_name)
     assay = [assay_name, fwd_primer_seq, rev_primer_seq]
     assay += [probe_seq] if probe_seq != '' else []
     assay = '\t'.join(assay)
-    path_to_tntblast_assay = os.path.join(path_to_output, assay_stem + '_tntblast_assay.tsv')
+    path_to_tntblast_assay = os.path.join(path_to_output, assay_name + '_tntblast_assay.tsv')
     with open(path_to_tntblast_assay, 'w') as output_file:
         output_file.write(assay + '\n')
     # Create terminal command for TNTBLAST and run
-    path_to_tntblast_txt_output = os.path.join(path_to_output, assay_stem + '_tntblast_output.txt')
-    terminal_command = [
-        'tntblast',
-        '-i', path_to_tntblast_assay,
-        '-d', path_to_genomes,
-        '-o', path_to_tntblast_txt_output,
-        '-e', str(melting_temp),
-        '-E', str(melting_temp),
-        '-t', str(primer_molarity / 1000000),
-        '-T', str(probe_molarity / 1000000),
-        '--best-match',
-        '-m', '0',
-        '-v', 'F',
-    ]
-    completed_process = subprocess.run(terminal_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False)
+    path_to_tntblast_txt_output = os.path.join(path_to_output, assay_name + '_tntblast_output.txt')
+    terminal_command = (f'tntblast -i {path_to_tntblast_assay} -d {path_to_genomes} -o {path_to_tntblast_txt_output}'
+                        f' -e {melting_temp} -E {melting_temp} -t {primer_molarity / 1000000} -T {probe_molarity / 1000000}'
+                        f' --best-match -m 0 -v F')
+    completed_process = subprocess.run(terminal_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
     if completed_process.returncode != 0:
         print(f'\nERROR: TNTBLAST terminated with errors.\nTNTBLAST error code: {completed_process.returncode}\n')
         exit(1)
@@ -336,9 +276,8 @@ def parse_tntblast_output(assay_details, job_name, path_to_output):
     tntblast_results = {field: [] for field in fields}
     # Open TNTBLAST output and parse results into dataframe
     assay_name = assay_details[0]
-    assay_stem = assay_file_stem(assay_name)
     print('Parsing TNTBLAST output from', assay_name, '...')
-    path_to_tntblast_txt_input = os.path.join(path_to_output, assay_stem + '_tntblast_output.txt')
+    path_to_tntblast_txt_input = os.path.join(path_to_output, assay_name + '_tntblast_output.txt')
     if os.path.exists(path_to_tntblast_txt_input) == False:
         print('\nERROR: Expected TNTBLAST output does not exist.\n')
         exit(1)
@@ -433,9 +372,11 @@ def parse_tntblast_output(assay_details, job_name, path_to_output):
         tntblast_results['amplicon_range'] = tntblast_results['amplicon_range'].str.split(' .. ')
         tntblast_results['probe_range']    = tntblast_results['probe_range'].str.split(' .. ')
         tntblast_results['probe_site_seq'] = tntblast_results.apply(get_probe_site, axis=1)
-    # Re-order columns for final output
+    # Re-order columns for final output.
+    # amplicon_seq is kept here so write_amplicon_fasta() can use it;
+    # write_tntblast_results() drops it when writing the PCR_results TSV.
     oligo_cols = ['name', 'seq', 'site_seq', 'mismatches', 'gaps', 'errors', 'tm']
-    cols = (['assay_name', 'target', 'total_errors', 'min_3prime_clamp']
+    cols = (['assay_name', 'target', 'amplicon_seq', 'total_errors', 'min_3prime_clamp']
             + [oligo + '_' + col for oligo in oligos for col in oligo_cols])
     tntblast_results = tntblast_results[cols]
     # GARBAGE COLLECTION
@@ -452,10 +393,57 @@ def write_tntblast_results(job_name, path_to_output, tntblast_results):
     oligo_cols = ['name', 'seq', 'site_seq', 'mismatches', 'gaps', 'errors', 'tm']
     cols = (['assay_name', 'target', 'total_errors', 'min_3prime_clamp']
             + [oligo + '_' + col for oligo in oligos for col in oligo_cols])
-    tntblast_results = sanitize_spreadsheet_dataframe(tntblast_results[cols])
+    tntblast_results = tntblast_results[cols]
     # Write output
     path_to_tntblast_tsv = os.path.join(path_to_output, job_name + '_PCR_results.tsv')
     tntblast_results.to_csv(path_to_tntblast_tsv, sep='\t', index=False)
+
+
+
+def write_amplicon_fasta(job_name, path_to_output, tntblast_results):
+    """Write a multi-FASTA file of amplicon sequences for each assay.
+
+    One FASTA file is produced per assay, named:
+        <job_name>_<assay_name>_amplicons.fasta
+
+    Each record contains the full amplicon sequence as reported by TNTBLAST
+    (forward primer binding site through to the end of the reverse primer
+    binding site, inclusive).  The FASTA header encodes the assay name,
+    target genome header, and total error count so the sequences can be
+    filtered or grouped downstream.
+
+    Format:
+        ><target> assay=<assay_name> errors=<total_errors>
+        <amplicon_seq>
+    """
+    print('Writing amplicon FASTA files...')
+    required = {'assay_name', 'target', 'amplicon_seq', 'total_errors'}
+    if tntblast_results.empty or not required.issubset(tntblast_results.columns):
+        print('  WARNING: amplicon_seq column not found — skipping FASTA output.')
+        return
+
+    for assay_name, grp in tntblast_results.groupby('assay_name'):
+        # Build a safe filename component from the assay name
+        safe_name = str(assay_name).replace(' ', '_').replace('/', '_')
+        path_to_fasta = os.path.join(
+            path_to_output, f'{job_name}_{safe_name}_amplicons.fasta')
+
+        records_written = 0
+        with open(path_to_fasta, 'w') as fh:
+            for _, row in grp.iterrows():
+                seq = str(row['amplicon_seq']).strip()
+                if not seq or seq.lower() == 'nan':
+                    continue
+                target = str(row['target']).strip()
+                errors = row['total_errors']
+                error_str = str(int(errors)) if pd.notna(errors) else 'NA'
+                fh.write(
+                    f'>{target} assay={assay_name} errors={error_str}\n'
+                    f'{seq}\n'
+                )
+                records_written += 1
+
+        print(f'  {assay_name}: {records_written} amplicons → {path_to_fasta}')
 
 
 def count_targets(path_to_genomes):
@@ -496,8 +484,7 @@ def write_assay_report(job_name, path_to_output, tntblast_results, path_to_genom
     assay_report = assay_report.sort_values(['assay_name', 'target_count'], ascending=[True, False])
     cols = ['assay_name', 'total_targets', 'detected_targets', 'perc_detected', 'total_errors',
             'target_count', 'perc_of_detected', 'perc_of_total']
-    assay_report = sanitize_spreadsheet_dataframe(assay_report[cols])
-    assay_report.to_csv(path_to_report_file, sep='\t', index=False)
+    assay_report[cols].to_csv(path_to_report_file, sep='\t', index=False)
 
 
 def write_variant_report(job_name, path_to_output, tntblast_results, path_to_genomes, threshold):
@@ -536,8 +523,7 @@ def write_variant_report(job_name, path_to_output, tntblast_results, path_to_gen
     variant_report = variant_report.sort_values(['assay_name', 'oligo', 'target_count'], ascending=[True, True, False])
     cols = ['assay_name', 'oligo', 'oligo_name', 'oligo_seq', 'total_targets', 'detected_targets', 'perc_detected',
             'oligo_site_variant', 'oligo_errors', 'target_count', 'perc_of_detected', 'perc_of_total']
-    variant_report = sanitize_spreadsheet_dataframe(variant_report[cols])
-    variant_report.to_csv(path_to_report_file, sep='\t', index=False)
+    variant_report[cols].to_csv(path_to_report_file, sep='\t', index=False)
 
 
 def longest_common_kmer(seq_1, seq_2):
@@ -656,8 +642,7 @@ def write_missed_seqs_report(job_name, path_to_output, tntblast_results, path_to
     # Reorder columns and write report
     path_to_report_file = os.path.join(path_to_output, job_name + '_missed_seqs_report.tsv')
     cols = ['assay_name', 'target', 'target_length', 'total_Ns', 'perc_Ns']
-    missed_seqs_report = sanitize_spreadsheet_dataframe(missed_seqs_report[cols])
-    missed_seqs_report.to_csv(path_to_report_file, sep='\t', index=False)
+    missed_seqs_report[cols].to_csv(path_to_report_file, sep='\t', index=False)
 
 
 if __name__ == '__main__':

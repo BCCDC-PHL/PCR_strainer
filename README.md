@@ -288,13 +288,8 @@ Full per-genome TNTBLAST results, one row per detected genome per assay. This is
 | `*_errors` | `mismatches + gaps` |
 | `*_tm` | Melting temperature (°C) calculated by TNTBLAST for this alignment |
 
-One additional top-level column is also present:
 
-| Column | Description |
-|---|---|
-| `probe_strand` | `sense` or `antisense` — the strand on which the probe binds. `NaN` for assays without a probe |
-
-`probe_mismatches`, `probe_gaps`, `probe_errors`, `probe_tm`, and `probe_strand` are `NaN` for assays without a probe.
+`probe_mismatches`, `probe_gaps`, `probe_errors`, and `probe_tm` are `NaN` for assays without a probe.
 
 ---
 
@@ -341,7 +336,7 @@ The HTML report (`<prefix>_report.html`) is generated automatically at the end o
 
 Charts are rendered as inline SVG, which is crisp at any zoom level or print size.
 
-**Probe strand orientation:** When the probe binds the antisense strand, the per-position heatmap and variant table show the probe sequence aligned to the reverse complement of the amplicon site, so mismatches are reported relative to the probe as supplied in the assay CSV.
+**Probe strand orientation:** PCR_strainer automatically detects whether each probe binds the sense or antisense strand by trying both orientations and selecting the one that produces more matching positions. Mismatches are always reported relative to the probe sequence as supplied in the assay CSV, regardless of which strand the probe binds.
 
 ### Standalone use
 
@@ -382,7 +377,7 @@ However, the site-variant notation field (`*_site_seq`) is produced by a charact
 
 **Probe Tm with MGB or LNA modifications:** TNTBLAST calculates Tm from nearest-neighbour thermodynamics for unmodified DNA. Probes with minor groove binder (MGB) or locked nucleic acid (LNA) modifications have experimentally higher Tms — typically 15–20 °C higher for MGB probes. The Tm values reported in `PCR_results.tsv` and the HTML report reflect the unmodified calculation and should be interpreted accordingly. Sequences that fall below the `-m` threshold due to this underestimate will appear in the missed sequences report rather than the variant report.
 
-**Probe strand orientation:** PCR_strainer correctly handles probes on either strand when extracting and aligning the probe binding site. However, if you observe unusual site sequences for a probe assay, confirm that the probe sequence in your assay CSV is supplied 5′ → 3′ as written (not pre-reverse-complemented), and that TNTBLAST is reporting `probe strand = antisense` as expected for your assay design.
+**Probe strand orientation:** PCR_strainer automatically detects probe strand orientation by aligning the extracted amplicon site in both orientations and selecting the one with more matching positions. Ensure the probe sequence in your assay CSV is supplied 5′ → 3′ as written (not pre-reverse-complemented).
 
 ---
 
@@ -407,12 +402,12 @@ git push origin v0.2.5
 
 ### v0.2.7 (BCCDC-PHL)
 - Renamed `PCR_strainer_v_0_2_4.py` → `pcr_strainer.py`; version now stored as `__version__` at module level
-- Added new TNTBLAST output fields: `fwd_primer_tm`, `rev_primer_tm`, `probe_tm`, `probe_strand`, `min_3prime_clamp`
+- Added new TNTBLAST output fields: `fwd_primer_tm`, `rev_primer_tm`, `probe_tm`, `min_3prime_clamp`
 - Added `pcr_strainer_report.py`: self-contained static HTML summary report with no JavaScript
 - Added per-assay amplicon FASTA output (`write_amplicon_fasta`)
 - Added TNTBLAST and PCR_strainer version info to HTML report provenance block
 - Added absolute sequence counts alongside percentages in all action/caution messages
-- Fixed probe site sequence for reverse-strand probes: extracted amplicon site is now reverse complemented before alignment when `probe strand = antisense`, eliminating the garbled site sequence output
+- Fixed probe site sequence for reverse-strand probes: orientation is now auto-detected by trying both alignments and selecting the one with more matching positions, eliminating the garbled site sequence output and the `ValueError: All arrays must be of the same length` crash caused by `probe strand` not being consistently present in TNTBLAST output
 - Fixed status escalation: high-prevalence near-3′ or multi-error variants now correctly trigger ACTION REQUIRED
 - Fixed `amplicon_seq` being dropped from DataFrame before FASTA output
 - Fixed UTF-8 BOM in assay CSV names (e.g. files saved by Excel on Windows)

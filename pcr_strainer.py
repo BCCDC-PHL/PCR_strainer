@@ -309,7 +309,6 @@ def parse_tntblast_output(assay_details, job_name, path_to_output):
     fields += [oligo + ' gaps' for oligo in oligos]
     fields += [oligo + ' tm' for oligo in oligos]   # melting temperature for each oligo
     fields += ["min 3' clamp"]                       # length of exact-match run at the 3' end of fwd primer
-    fields += ['probe strand']                        # sense or antisense — needed to correctly orient probe site
     fields += ['amplicon seq']
     # Create empty dict for tntblast results
     tntblast_results = {field: [] for field in fields}
@@ -336,7 +335,6 @@ def parse_tntblast_output(assay_details, job_name, path_to_output):
                 tntblast_results['probe gaps'].append(np.nan)
                 tntblast_results['probe range'].append(np.nan)
                 tntblast_results['probe tm'].append(np.nan)
-                tntblast_results['probe strand'].append(np.nan)
     # Convert dictionary to dataframe and re-order columns
     tntblast_results = pd.DataFrame.from_dict(tntblast_results)
     tntblast_results = tntblast_results[fields]
@@ -347,7 +345,6 @@ def parse_tntblast_output(assay_details, job_name, path_to_output):
     cols += [oligo + '_gaps' for oligo in oligos]
     cols += [oligo + '_tm' for oligo in oligos]
     cols += ['min_3prime_clamp']
-    cols += ['probe_strand']
     cols += ['amplicon_seq']
     tntblast_results.columns = cols
     # Convert mismatches and gaps to int, Tm and clamp to float
@@ -400,20 +397,24 @@ def parse_tntblast_output(assay_details, job_name, path_to_output):
         rev_primer_site_seq = write_oligo_site_variant(rev_primer_seq, rev_primer_site_seq)
         return rev_primer_site_seq
     tntblast_results['rev_primer_site_seq'] = tntblast_results.apply(get_rev_primer_site, axis=1)
+    def _count_matches(variant):
+        """Count uppercase (matching) characters in a site variant string."""
+        return sum(1 for c in variant if c.isupper())
+
     def get_probe_site(row):
         probe_start = int(row['probe_range'][0]) - int(row['amplicon_range'][0])
         probe_length = int(row['probe_range'][1]) - int(row['probe_range'][0]) + row['probe_gaps'] + 1
         probe_end = probe_start + probe_length
         probe_site_seq = row['amplicon_seq'][probe_start:probe_end]
-        # When the probe binds the antisense strand, the extracted amplicon
-        # sequence is on the opposite strand to the probe sequence.  Reverse
-        # complement the site before alignment so write_oligo_site_variant
-        # receives two sequences on the same strand.
-        strand = str(row.get('probe_strand', 'sense')).strip().lower()
-        if strand == 'antisense':
-            probe_site_seq = rev_comp(probe_site_seq)
-        probe_site_seq = write_oligo_site_variant(row['probe_seq'], probe_site_seq)
-        return probe_site_seq
+        # Try both strand orientations and keep whichever produces more
+        # matching positions.  This avoids relying on TNTBLAST to output
+        # an explicit 'probe strand' field, which is not consistently
+        # present across all TNTBLAST versions.
+        sense_variant    = write_oligo_site_variant(row['probe_seq'], probe_site_seq)
+        antisense_variant = write_oligo_site_variant(row['probe_seq'], rev_comp(probe_site_seq))
+        if _count_matches(antisense_variant) > _count_matches(sense_variant):
+            return antisense_variant
+        return sense_variant
     if assay_details[5] == '' and assay_details[6] == '':
         tntblast_results['probe_site_seq'] = np.nan
     else:
@@ -424,8 +425,7 @@ def parse_tntblast_output(assay_details, job_name, path_to_output):
     # amplicon_seq is kept here so write_amplicon_fasta() can use it;
     # write_tntblast_results() drops it when writing the PCR_results TSV.
     oligo_cols = ['name', 'seq', 'site_seq', 'mismatches', 'gaps', 'errors', 'tm']
-    cols = (['assay_name', 'target', 'amplicon_seq', 'total_errors', 'min_3prime_clamp',
-             'probe_strand']
+    cols = (['assay_name', 'target', 'amplicon_seq', 'total_errors', 'min_3prime_clamp']
             + [oligo + '_' + col for oligo in oligos for col in oligo_cols])
     tntblast_results = tntblast_results[cols]
     # GARBAGE COLLECTION
@@ -440,7 +440,7 @@ def write_tntblast_results(job_name, path_to_output, tntblast_results):
     # Re-order columns
     oligos = ['fwd_primer', 'rev_primer', 'probe']
     oligo_cols = ['name', 'seq', 'site_seq', 'mismatches', 'gaps', 'errors', 'tm']
-    cols = (['assay_name', 'target', 'total_errors', 'min_3prime_clamp', 'probe_strand']
+    cols = (['assay_name', 'target', 'total_errors', 'min_3prime_clamp']
             + [oligo + '_' + col for oligo in oligos for col in oligo_cols])
     tntblast_results = tntblast_results[cols]
     # Write output

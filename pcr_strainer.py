@@ -19,11 +19,48 @@ import numpy as np
 import pandas as pd
 
 
+
+def get_tntblast_version() -> str:
+    """
+    Query the TNTBLAST binary for its version string.
+
+    TNTBLAST prints its version to stdout when called with --version and
+    exits with code 0.  Returns a plain version string such as '2.4' or
+    '2.4.0'.  If the binary is not found or the version cannot be parsed,
+    returns 'unknown'.
+    """
+    try:
+        result = subprocess.run(
+            ['tntblast', '--version'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+        output = (result.stdout + result.stderr).decode('utf-8', errors='replace')
+        # TNTBLAST version lines look like:
+        #   ThermonucleotideBLAST (version 2.4)
+        # or just:
+        #   2.4
+        import re
+        m = re.search(r'version\s+([\d.]+)', output, re.IGNORECASE)
+        if m:
+            return m.group(1)
+        # Fallback: grab any standalone version-looking token
+        m2 = re.search(r'(\d+\.\d+[\.\d]*)', output)
+        if m2:
+            return m2.group(1)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return 'unknown'
+
+
 def main():
     version = __version__
     # Parse command line arguments
     args = parse_args(sys.argv, version)
+    tntblast_version = get_tntblast_version()
     print(f'\nPCR_strainer v{version}')
+    print(f'TNTBLAST v{tntblast_version}')
     print('https://github.com/KevinKuchinski/PCR_strainer\n')
     out_path, name = os.path.split(args['-o'])
     out_path = '.' if out_path == '' else out_path
@@ -58,6 +95,7 @@ def main():
             min_tm=args['-m'],
             variant_threshold=args['-t'],
             tool_version=version,
+            tntblast_version=tntblast_version,
         )
     except ImportError:
         print('Note: pcr_strainer_report.py not found — HTML report skipped.')
@@ -271,6 +309,7 @@ def parse_tntblast_output(assay_details, job_name, path_to_output):
     fields += [oligo + ' gaps' for oligo in oligos]
     fields += [oligo + ' tm' for oligo in oligos]   # melting temperature for each oligo
     fields += ["min 3' clamp"]                       # length of exact-match run at the 3' end of fwd primer
+    fields += ['probe strand']                        # sense or antisense — needed to correctly orient probe site
     fields += ['amplicon seq']
     # Create empty dict for tntblast results
     tntblast_results = {field: [] for field in fields}
@@ -297,6 +336,7 @@ def parse_tntblast_output(assay_details, job_name, path_to_output):
                 tntblast_results['probe gaps'].append(np.nan)
                 tntblast_results['probe range'].append(np.nan)
                 tntblast_results['probe tm'].append(np.nan)
+                tntblast_results['probe strand'].append(np.nan)
     # Convert dictionary to dataframe and re-order columns
     tntblast_results = pd.DataFrame.from_dict(tntblast_results)
     tntblast_results = tntblast_results[fields]
@@ -307,6 +347,7 @@ def parse_tntblast_output(assay_details, job_name, path_to_output):
     cols += [oligo + '_gaps' for oligo in oligos]
     cols += [oligo + '_tm' for oligo in oligos]
     cols += ['min_3prime_clamp']
+    cols += ['probe_strand']
     cols += ['amplicon_seq']
     tntblast_results.columns = cols
     # Convert mismatches and gaps to int, Tm and clamp to float
@@ -364,6 +405,13 @@ def parse_tntblast_output(assay_details, job_name, path_to_output):
         probe_length = int(row['probe_range'][1]) - int(row['probe_range'][0]) + row['probe_gaps'] + 1
         probe_end = probe_start + probe_length
         probe_site_seq = row['amplicon_seq'][probe_start:probe_end]
+        # When the probe binds the antisense strand, the extracted amplicon
+        # sequence is on the opposite strand to the probe sequence.  Reverse
+        # complement the site before alignment so write_oligo_site_variant
+        # receives two sequences on the same strand.
+        strand = str(row.get('probe_strand', 'sense')).strip().lower()
+        if strand == 'antisense':
+            probe_site_seq = rev_comp(probe_site_seq)
         probe_site_seq = write_oligo_site_variant(row['probe_seq'], probe_site_seq)
         return probe_site_seq
     if assay_details[5] == '' and assay_details[6] == '':
@@ -376,7 +424,8 @@ def parse_tntblast_output(assay_details, job_name, path_to_output):
     # amplicon_seq is kept here so write_amplicon_fasta() can use it;
     # write_tntblast_results() drops it when writing the PCR_results TSV.
     oligo_cols = ['name', 'seq', 'site_seq', 'mismatches', 'gaps', 'errors', 'tm']
-    cols = (['assay_name', 'target', 'amplicon_seq', 'total_errors', 'min_3prime_clamp']
+    cols = (['assay_name', 'target', 'amplicon_seq', 'total_errors', 'min_3prime_clamp',
+             'probe_strand']
             + [oligo + '_' + col for oligo in oligos for col in oligo_cols])
     tntblast_results = tntblast_results[cols]
     # GARBAGE COLLECTION
@@ -391,7 +440,7 @@ def write_tntblast_results(job_name, path_to_output, tntblast_results):
     # Re-order columns
     oligos = ['fwd_primer', 'rev_primer', 'probe']
     oligo_cols = ['name', 'seq', 'site_seq', 'mismatches', 'gaps', 'errors', 'tm']
-    cols = (['assay_name', 'target', 'total_errors', 'min_3prime_clamp']
+    cols = (['assay_name', 'target', 'total_errors', 'min_3prime_clamp', 'probe_strand']
             + [oligo + '_' + col for oligo in oligos for col in oligo_cols])
     tntblast_results = tntblast_results[cols]
     # Write output

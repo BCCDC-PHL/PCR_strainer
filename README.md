@@ -41,23 +41,27 @@ flowchart TD
     undetected sequences"]
     G --> K["write_tntblast_results()
     full per-genome results"]
-    G --> L["write_html_report()
+    G --> L["write_amplicon_fasta()
+    one file per assay"]
+    G --> M["write_html_report()
     pcr_strainer_report.py"]
 
-    H --> M[/"assay_report.tsv"/]
-    I --> N[/"variant_report.tsv"/]
-    J --> O[/"missed_seqs_report.tsv"/]
-    K --> P[/"PCR_results.tsv"/]
-    L --> Q[/"report.html
+    H --> N[/"assay_report.tsv"/]
+    I --> O[/"variant_report.tsv"/]
+    J --> P[/"missed_seqs_report.tsv"/]
+    K --> Q[/"PCR_results.tsv"/]
+    L --> R[/"<assay>_amplicons.fasta"/]
+    M --> S[/"report.html
     static · no JS · SVG charts"/]
 
     style A fill:#EBF3FB,stroke:#2E75B6
     style B fill:#EBF3FB,stroke:#2E75B6
-    style Q fill:#D4EDDA,stroke:#2E7D46
-    style M fill:#F5F5F5,stroke:#888
+    style S fill:#D4EDDA,stroke:#2E7D46
     style N fill:#F5F5F5,stroke:#888
     style O fill:#F5F5F5,stroke:#888
     style P fill:#F5F5F5,stroke:#888
+    style Q fill:#F5F5F5,stroke:#888
+    style R fill:#F5F5F5,stroke:#888
     style tntblast fill:#FFFDE7,stroke:#B07800
 ```
 
@@ -170,7 +174,6 @@ assay_name,fwd_primer_name,fwd_primer_seq,rev_primer_name,rev_primer_seq
 - IUPAC degenerate bases are permitted (A T G C W S M K R Y B V D H N)
 - FASTA headers in the reference genome file must be unique
 - Assay names and all oligo names must be unique across the entire file
-- Assay names are also used to derive temporary/output filenames. They may contain spaces and punctuation, but assay names that normalize to the same filename stem are rejected. In practice, avoid names that differ only by spaces or punctuation (for example `Assay-1` and `Assay 1`).
 
 **Example:**
 ```
@@ -186,7 +189,6 @@ FluA_RP1,FIuA-RP1-F,ATGCMKRYW,FIuA-RP1-R,CAGCATCGTCAG
 PCR_strainer expects DNA sequences in FASTA format.
 
 - FASTA headers must be unique and must not contain spaces
-- No additional FASTA header restrictions are imposed for execution. Headers are written verbatim in the analysis outputs, except that TSV exports neutralize leading spreadsheet formula characters (`=`, `+`, `-`, `@`) for safer opening in Excel/LibreOffice.
 - For single-stranded RNA genomes (influenza, SARS-CoV-2, etc.), ensure all sequences represent the same strand sense (e.g. all coding/positive sense)
 - TNTBLAST does not expand degenerate nucleotides in subject sequences. Sequences with degenerate bases in primer binding sites may produce false negatives; consider filtering these out before running
 
@@ -198,14 +200,13 @@ PCR_strainer expects DNA sequences in FASTA format.
 
 PCR_strainer writes five output files per run, all sharing the prefix given to `-o`.
 
-For spreadsheet safety, text fields that begin with `=`, `+`, `-`, or `@` are prefixed with a leading apostrophe in the TSV outputs. Spreadsheet applications will display the original text while treating it as literal data rather than a formula.
-
 | File | Description |
 |---|---|
 | `<prefix>_assay_report.tsv` | Assay-level inclusivity summary |
 | `<prefix>_variant_report.tsv` | Oligo site variants above the reporting threshold |
 | `<prefix>_missed_seqs_report.tsv` | Reference sequences not detected by each assay |
 | `<prefix>_PCR_results.tsv` | Full per-genome TNTBLAST results |
+| `<prefix>_<assay_name>_amplicons.fasta` | Amplicon sequences for each detected genome (one file per assay) |
 | `<prefix>_report.html` | Self-contained HTML summary report (see below) |
 
 ---
@@ -287,7 +288,34 @@ Full per-genome TNTBLAST results, one row per detected genome per assay. This is
 | `*_errors` | `mismatches + gaps` |
 | `*_tm` | Melting temperature (°C) calculated by TNTBLAST for this alignment |
 
-`probe_mismatches`, `probe_gaps`, `probe_errors`, and `probe_tm` are `NaN` for assays without a probe.
+One additional top-level column is also present:
+
+| Column | Description |
+|---|---|
+| `probe_strand` | `sense` or `antisense` — the strand on which the probe binds. `NaN` for assays without a probe |
+
+`probe_mismatches`, `probe_gaps`, `probe_errors`, `probe_tm`, and `probe_strand` are `NaN` for assays without a probe.
+
+---
+
+### <prefix>_<assay_name>_amplicons.fasta
+
+One multi-FASTA file per assay containing the full amplicon sequence for every detected genome. The amplicon spans from the start of the forward primer binding site to the end of the reverse primer binding site, inclusive, exactly as reported by TNTBLAST.
+
+The FASTA header encodes the target genome identifier, assay name, and total error count so records can be filtered or grouped downstream without needing to cross-reference other output files:
+
+```
+>EPI_ISL_123456 assay=FluA_RP1 errors=0
+ATGCATGCATGCATGCATGCATGC...
+>EPI_ISL_789012 assay=FluA_RP1 errors=1
+ATGCATGCATGCATGCATGCATGT...
+```
+
+These files can be imported directly into alignment tools (MUSCLE, MAFFT), phylogenetic software (IQ-TREE, FastTree), or sequence viewers. To extract only perfect-match amplicons:
+
+```bash
+awk '/errors=0/{p=1; print; next} /^>/{p=0} p' run1_FluA_RP1_amplicons.fasta     > run1_FluA_RP1_perfect_match.fasta
+```
 
 ---
 
@@ -308,10 +336,12 @@ The HTML report (`<prefix>_report.html`) is generated automatically at the end o
 - Metric cards: overall inclusivity, perfect match rate, missed genomes
 - Error distribution chart (% of detected genomes at 0, 1, 2, 3+ total errors)
 - Mismatch rate by oligo chart (% with ≥1 error per oligo)
-- Per-position mismatch heatmap for each oligo, with Tm range and 3′ clamp shown beneath the forward primer
-- Sequence variants table with interpretation and prevalence bars
+- Per-position mismatch heatmap for each oligo, with Tm range shown beneath each oligo header
+- Sequence variants table with per-variant Tm, interpretation, and prevalence bars
 
 Charts are rendered as inline SVG, which is crisp at any zoom level or print size.
+
+**Probe strand orientation:** When the probe binds the antisense strand, the per-position heatmap and variant table show the probe sequence aligned to the reverse complement of the amplicon site, so mismatches are reported relative to the probe as supplied in the assay CSV.
 
 ### Standalone use
 
@@ -333,8 +363,8 @@ All flags mirror the corresponding PCR_strainer arguments. The script reads the 
 | Status | Condition |
 |---|---|
 | **PASS** | Overall inclusivity ≥ 90% and no oligo with ≥ 15% mismatch rate |
-| **CAUTION** | Overall inclusivity ≥ 75%, or any oligo with ≥ 15% mismatch rate |
-| **ACTION REQUIRED** | Overall inclusivity < 75% |
+| **CAUTION** | Overall inclusivity ≥ 75%; or any oligo with ≥ 15% mismatch rate but no critical variant pattern |
+| **ACTION REQUIRED** | Overall inclusivity < 75%; or a variant with prevalence ≥ 15% that has a mismatch within the last 3 bp of the primer (near-3′ end, inhibits Taq extension) or carries ≥ 2 total errors |
 
 Thresholds can be adjusted with `--pass-threshold` and `--caution-threshold`.
 
@@ -345,6 +375,14 @@ Thresholds can be adjusted with `--pass-threshold` and `--caution-threshold`.
 TNTBLAST correctly treats degenerate bases in oligo sequences when computing mismatches (e.g. `R` at a position matches both `A` and `G`). The mismatch count columns in `PCR_results.tsv` are therefore accurate.
 
 However, the site-variant notation field (`*_site_seq`) is produced by a character-by-character comparison that does not account for degeneracy — a genome base that is a valid match for a degenerate oligo base may appear as lowercase (mismatch notation) in this field. The HTML report corrects for this: per-position mismatch frequencies in the heatmap are computed using the full IUPAC lookup table, so positions with degenerate oligo bases are not falsely reported as 100% mismatch.
+
+---
+
+## Known limitations
+
+**Probe Tm with MGB or LNA modifications:** TNTBLAST calculates Tm from nearest-neighbour thermodynamics for unmodified DNA. Probes with minor groove binder (MGB) or locked nucleic acid (LNA) modifications have experimentally higher Tms — typically 15–20 °C higher for MGB probes. The Tm values reported in `PCR_results.tsv` and the HTML report reflect the unmodified calculation and should be interpreted accordingly. Sequences that fall below the `-m` threshold due to this underestimate will appear in the missed sequences report rather than the variant report.
+
+**Probe strand orientation:** PCR_strainer correctly handles probes on either strand when extracting and aligning the probe binding site. However, if you observe unusual site sequences for a probe assay, confirm that the probe sequence in your assay CSV is supplied 5′ → 3′ as written (not pre-reverse-complemented), and that TNTBLAST is reporting `probe strand = antisense` as expected for your assay design.
 
 ---
 
@@ -367,14 +405,24 @@ git push origin v0.2.5
 
 ## Changelog
 
-### v0.2.5 (BCCDC-PHL)
+### v0.2.7 (BCCDC-PHL)
 - Renamed `PCR_strainer_v_0_2_4.py` → `pcr_strainer.py`; version now stored as `__version__` at module level
-- Added new TNTBLAST output fields: `fwd_primer_tm`, `rev_primer_tm`, `probe_tm`, `min_3prime_clamp`
+- Added new TNTBLAST output fields: `fwd_primer_tm`, `rev_primer_tm`, `probe_tm`, `probe_strand`, `min_3prime_clamp`
 - Added `pcr_strainer_report.py`: self-contained static HTML summary report with no JavaScript
+- Added per-assay amplicon FASTA output (`write_amplicon_fasta`)
+- Added TNTBLAST and PCR_strainer version info to HTML report provenance block
+- Added absolute sequence counts alongside percentages in all action/caution messages
+- Fixed probe site sequence for reverse-strand probes: extracted amplicon site is now reverse complemented before alignment when `probe strand = antisense`, eliminating the garbled site sequence output
+- Fixed status escalation: high-prevalence near-3′ or multi-error variants now correctly trigger ACTION REQUIRED
+- Fixed `amplicon_seq` being dropped from DataFrame before FASTA output
+- Fixed UTF-8 BOM in assay CSV names (e.g. files saved by Excel on Windows)
 - Fixed typo `completed_process.returncodes` → `returncode` in TNTBLAST error handling
 - Fixed `line.split(' = ')` → `line.split(' = ', 1)` to guard against values containing ` = `
 - Fixed degenerate base false-positives in per-position heatmap (IUPAC lookup table)
 - Fixed IUPAC regex missing uppercase `M` and `K`
+
+### v0.2.5 (BCCDC-PHL)
+- Initial BCCDC-PHL fork additions (see v0.2.6 for full list; all changes released together)
 
 ### v0.2.4 (original)
 - See [upstream repository](https://github.com/KevinKuchinski/PCR_strainer) for prior history

@@ -92,13 +92,14 @@ def _configure_logging(log_file: Optional[str] = None) -> None:
 @dataclass
 class ReportConfig:
     """All settings needed to build one report."""
-    genome_file:       Optional[str]   = None
-    assay_file:        Optional[str]   = None
-    min_tm:            Optional[float] = None
-    variant_threshold: Optional[float] = None
-    tool_version:      str             = 'PCR_strainer'
-    pass_threshold:    float           = 90.0
-    caution_threshold: float           = 75.0
+    genome_file:        Optional[str]   = None
+    assay_file:         Optional[str]   = None
+    min_tm:             Optional[float] = None
+    variant_threshold:  Optional[float] = None
+    tool_version:       str             = 'PCR_strainer'
+    tntblast_version:   Optional[str]   = None
+    pass_threshold:     float           = 90.0
+    caution_threshold:  float           = 75.0
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -251,19 +252,10 @@ _OLIGO_SEQ_RE  = re.compile(r'^[ATGCWSMKRYBVDHNatgcwsmkrybvdhn()\-]+$')
 _OLIGO_NAME_RE = re.compile(r'^[\w\s\-_./:]{1,200}$')
 _MAX_OLIGO_LEN  = 200
 _MAX_NAME_LEN   = 200
-_SPREADSHEET_FORMULA_PREFIXES = ('=', '+', '-', '@')
-
-
-def _unsanitise_spreadsheet_text(s: object) -> object:
-    """Undo TSV spreadsheet-safety escaping when reading back our own outputs."""
-    if isinstance(s, str) and len(s) >= 2 and s[0] == "'" and s[1] in _SPREADSHEET_FORMULA_PREFIXES:
-        return s[1:]
-    return s
 
 
 def _sanitise_seq(s: str, field: str = 'sequence') -> str:
     """Validate a nucleotide sequence; return empty string if invalid."""
-    s = _unsanitise_spreadsheet_text(s)
     if not isinstance(s, str):
         return ''
     s = s.strip()
@@ -280,7 +272,6 @@ def _sanitise_seq(s: str, field: str = 'sequence') -> str:
 
 def _sanitise_name(s: str, field: str = 'name') -> str:
     """Validate a name string; strip dangerous characters if suspicious."""
-    s = _unsanitise_spreadsheet_text(s)
     if not isinstance(s, str):
         return '(unknown)'
     s = s.strip()[:_MAX_NAME_LEN]
@@ -289,37 +280,6 @@ def _sanitise_name(s: str, field: str = 'name') -> str:
                     field, s[:40])
         s = re.sub(r'[^\w\s\-_./:()]', '', s)[:_MAX_NAME_LEN]
     return s
-
-
-def _count_threshold_omitted_variants(
-        pcr_a: pd.DataFrame,
-        oligo: str,
-        detected_targets: int,
-        threshold: Optional[float],
-) -> int:
-    """Count unique non-zero-error site variants omitted solely by prevalence threshold."""
-    if threshold in (None, 0) or pcr_a.empty or detected_targets <= 0:
-        return 0
-
-    site_col = f'{oligo}_site_seq'
-    err_col = f'{oligo}_errors'
-    if site_col not in pcr_a.columns or err_col not in pcr_a.columns:
-        return 0
-
-    rows = pcr_a[[site_col, err_col]].dropna().copy()
-    if rows.empty:
-        return 0
-
-    rows[site_col] = rows[site_col].map(_unsanitise_spreadsheet_text)
-    rows[site_col] = rows[site_col].astype(str)
-    rows[err_col] = pd.to_numeric(rows[err_col], errors='coerce')
-    rows = rows[rows[err_col] > 0]
-    if rows.empty:
-        return 0
-
-    grouped = rows.groupby([site_col, err_col]).size().reset_index(name='target_count')
-    grouped['pct_of_detected'] = grouped['target_count'] * 100.0 / detected_targets
-    return int((grouped['pct_of_detected'] < float(threshold)).sum())
 
 
 # ── Degenerate base handling ──────────────────────────────────────────────────
@@ -523,6 +483,8 @@ def build_report_data(
     provenance = {
         'run_date':          datetime.now().strftime('%Y-%m-%d'),
         'tool_version':      _sanitise_name(config.tool_version, 'tool_version'),
+        'tntblast_version':  _sanitise_name(config.tntblast_version, 'tntblast_version')
+                             if config.tntblast_version else None,
         'total_genomes':     total_genomes,
         'assay_file':        os.path.basename(config.assay_file)  if config.assay_file  else None,
         'genome_file':       os.path.basename(config.genome_file) if config.genome_file else None,
@@ -568,12 +530,9 @@ def build_report_data(
                 missed_high_n_pct = round(
                     len(ms_a[ms_a['perc_Ns'] > 5]) * 100.0 / len(ms_a), 1)
 
-        pcr_a = (pcr[pcr['assay_name'] == assay_name]
-                 if not pcr.empty and 'assay_name' in pcr.columns
-                 else pd.DataFrame())
-
         oligo_mm_any: Dict[str, float] = {}
-        if not pcr_a.empty:
+        if not pcr.empty and 'assay_name' in pcr.columns:
+            pcr_a = pcr[pcr['assay_name'] == assay_name]
             n_det = len(pcr_a)
             for oligo in ('fwd_primer', 'rev_primer', 'probe'):
                 err_col = f'{oligo}_errors'
@@ -593,34 +552,22 @@ def build_report_data(
         oligos_out: List[dict] = []
 
         for oligo in ('fwd_primer', 'rev_primer', 'probe'):
-            seq_col  = f'{oligo}_seq'
-            name_col = f'{oligo}_name'
-            site_col = f'{oligo}_site_seq'
-            tm_col   = f'{oligo}_tm'
             pos_data = per_pos.get(assay_name, {}).get(oligo)
-
-            raw_seq = ''
-            if seq_col in pcr_a.columns:
-                seq_vals = pcr_a[seq_col].dropna().unique()
-                if len(seq_vals) > 0:
-                    raw_seq = str(seq_vals[0])
-            if raw_seq == '':
+            if pos_data is None:
                 continue
 
-            raw_name = oligo
-            if name_col in pcr_a.columns and not pcr_a[name_col].dropna().empty:
-                raw_name = str(pcr_a[name_col].dropna().iloc[0])
-
-            oligo_name = _sanitise_name(raw_name, f'{assay_name}/{oligo} name')
-            oligo_seq = _sanitise_seq(raw_seq, f'{assay_name}/{oligo} seq')
             any_mm_pct = oligo_mm_any.get(oligo, 0.0)
-            variants_out: List[dict] = []
-            omitted_variants = 0
-            threshold_omitted_variants = _count_threshold_omitted_variants(
-                pcr_a, oligo, detected_targets, config.variant_threshold)
-            available = bool(oligo_seq)
-            omission_reason: Optional[str] = None
+            oligo_chart_labels.append(oligo_labels[oligo])
+            oligo_chart_values.append(any_mm_pct)
 
+            # PCR results rows for this assay/oligo — used to look up per-variant Tm
+            site_col = f'{oligo}_site_seq'
+            tm_col   = f'{oligo}_tm'
+            pcr_assay = (pcr[pcr['assay_name'] == assay_name]
+                         if not pcr.empty and 'assay_name' in pcr.columns
+                         else pd.DataFrame())
+
+            variants_out: List[dict] = []
             if not vr_a.empty and 'oligo' in vr_a.columns:
                 vr_ol = vr_a[vr_a['oligo'] == oligo].copy()
                 if not vr_ol.empty and 'target_count' in vr_ol.columns:
@@ -630,15 +577,14 @@ def build_report_data(
                         str(vrow.get('oligo_site_variant', '')),
                         f'{assay_name}/{oligo} variant')
                     if not variant_seq:
-                        omitted_variants += 1
                         continue
 
                     # Tm distribution for the genomes that carry this specific variant
                     v_tm_stats: Optional[dict] = None
-                    if (not pcr_a.empty
-                            and site_col in pcr_a.columns
-                            and tm_col   in pcr_a.columns):
-                        v_rows  = pcr_a[pcr_a[site_col] == variant_seq]
+                    if (not pcr_assay.empty
+                            and site_col in pcr_assay.columns
+                            and tm_col   in pcr_assay.columns):
+                        v_rows  = pcr_assay[pcr_assay[site_col] == variant_seq]
                         v_tm_vals = pd.to_numeric(v_rows[tm_col], errors='coerce').dropna()
                         if not v_tm_vals.empty:
                             v_tm_stats = {
@@ -657,38 +603,13 @@ def build_report_data(
                         'tm_stats':    v_tm_stats,
                     })
 
-            if not available:
-                omission_reason = ('Oligo sequence could not be rendered in the report '
-                                   'because it contains unsupported characters after input validation.')
-                oligos_out.append({
-                    'type':             oligo,
-                    'label':            oligo_labels[oligo],
-                    'name':             oligo_name,
-                    'seq':              str(_unsanitise_spreadsheet_text(raw_seq)),
-                    'available':        False,
-                    'any_mm_pct':       any_mm_pct,
-                    'mm_pct':           [],
-                    'variants':         [],
-                    'tm_stats':         None,
-                    'omitted_variants': omitted_variants,
-                    'threshold_omitted_variants': threshold_omitted_variants,
-                    'omission_reason':  omission_reason,
-                })
-                continue
-
-            mm_pct = pos_data['mm_pct'] if pos_data is not None else [0.0] * len(oligo_seq)
-            if pos_data is None:
-                omission_reason = ('Per-position mismatch data were unavailable for this oligo, '
-                                   'so the heatmap could not be generated.')
-
-            oligo_chart_labels.append(oligo_labels[oligo])
-            oligo_chart_values.append(any_mm_pct)
-
             # Tm statistics across detected genomes for this oligo
+            tm_col  = f'{oligo}_tm'
             tm_stats: Optional[dict] = None
-            if not pcr_a.empty:
-                if tm_col in pcr_a.columns:
-                    tm_vals = pd.to_numeric(pcr_a[tm_col], errors='coerce').dropna()
+            if not pcr.empty and 'assay_name' in pcr.columns:
+                pcr_a_oligo = pcr[pcr['assay_name'] == assay_name]
+                if tm_col in pcr_a_oligo.columns:
+                    tm_vals = pd.to_numeric(pcr_a_oligo[tm_col], errors='coerce').dropna()
                     if not tm_vals.empty:
                         tm_stats = {
                             'min':  round(float(tm_vals.min()),  1),
@@ -697,18 +618,14 @@ def build_report_data(
                         }
 
             oligos_out.append({
-                'type':             oligo,
-                'label':            oligo_labels[oligo],
-                'name':             pos_data['name'] if pos_data is not None else oligo_name,
-                'seq':              pos_data['seq'] if pos_data is not None else oligo_seq,
-                'available':        True,
-                'any_mm_pct':       any_mm_pct,
-                'mm_pct':           mm_pct,
-                'variants':         variants_out,
-                'tm_stats':         tm_stats,
-                'omitted_variants': omitted_variants,
-                'threshold_omitted_variants': threshold_omitted_variants,
-                'omission_reason':  omission_reason,
+                'type':       oligo,
+                'label':      oligo_labels[oligo],
+                'name':       pos_data['name'],
+                'seq':        pos_data['seq'],
+                'any_mm_pct': any_mm_pct,
+                'mm_pct':     pos_data['mm_pct'],
+                'variants':   variants_out,
+                'tm_stats':   tm_stats,
             })
 
         peak_oligo: Optional[str] = None
@@ -757,7 +674,7 @@ def build_report_data(
                     if multi_error:
                         reasons.append(f'{v["errors"]} errors')
                     _action_reason = (
-                        f'{v["pct"]:.1f}% of detected genomes carry a '
+                        f'{v["pct"]:.1f}% ({v["count"]:,} of {detected_targets:,} detected genomes) carry a '
                         f'{ol["label"].lower()} variant with '
                         + ' and '.join(reasons) +
                         '. This is likely to cause amplification failure '
@@ -775,14 +692,16 @@ def build_report_data(
                 worst  = max(oligo_mm_any, key=oligo_mm_any.get)   # type: ignore[arg-type]
                 wpct   = oligo_mm_any[worst]
                 wlabel = oligo_labels.get(worst, worst)
+                n_with_mm = round(wpct * detected_targets / 100)
                 action_msg = (
-                    f'{wpct:.1f}% of detected genomes have at least one mismatch '
-                    f'in the {wlabel.lower()}. Review the per-position heatmap '
-                    f'and variant table before continued clinical use.'
+                    f'{wpct:.1f}% ({n_with_mm:,} of {detected_targets:,} detected genomes) '
+                    f'have at least one mismatch in the {wlabel.lower()}. '
+                    f'Review the per-position heatmap and variant table before continued clinical use.'
                 )
             else:
                 action_msg = (
-                    f'Overall inclusivity is {perc_detected:.1f}%. '
+                    f'Overall inclusivity is {perc_detected:.1f}% '
+                    f'({detected_targets:,} of {total_targets:,} genomes detected). '
                     f'Review the missed sequences report to determine whether this '
                     f'reflects genuine assay failure or poor reference genome quality.'
                 )
@@ -791,14 +710,17 @@ def build_report_data(
                 worst  = max(oligo_mm_any, key=oligo_mm_any.get)   # type: ignore[arg-type]
                 wpct   = oligo_mm_any[worst]
                 wlabel = oligo_labels.get(worst, worst)
+                n_with_mm = round(wpct * detected_targets / 100)
                 action_msg = (
-                    f'{wpct:.1f}% of detected genomes have at least one mismatch '
-                    f'in the {wlabel.lower()}. Review the per-position heatmap and '
-                    f'variant table to assess positional risk before continued clinical use.'
+                    f'{wpct:.1f}% ({n_with_mm:,} of {detected_targets:,} detected genomes) '
+                    f'have at least one mismatch in the {wlabel.lower()}. '
+                    f'Review the per-position heatmap and variant table to assess positional '
+                    f'risk before continued clinical use.'
                 )
             else:
                 action_msg = (
-                    f'Overall inclusivity is {perc_detected:.1f}%. '
+                    f'Overall inclusivity is {perc_detected:.1f}% '
+                    f'({detected_targets:,} of {total_targets:,} genomes detected). '
                     f'Review the missed sequences report to determine whether this '
                     f'reflects genuine assay failure or poor reference genome quality.'
                 )
@@ -1201,9 +1123,6 @@ details.ac[open] > summary .chev{transform:rotate(90deg)}
     letter-spacing:.5px}
 .mv{font-size:22px;font-weight:600;margin-top:2px}
 .ms2{font-size:11px;color:var(--text-l);margin-top:2px}
-.warn{margin:12px 0 0;background:#FFF8E1;border:1px solid #E5C96B;border-radius:8px;
-      padding:10px 12px;font-size:12px;color:#6B4E00}
-.warn strong{font-weight:700}
 /* Charts */
 .two{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:20px}
 @media(max-width:680px){.two{grid-template-columns:1fr}}
@@ -1276,7 +1195,8 @@ def _html_head(title: str = 'PCR_strainer \u00b7 Assay Inclusivity Report') -> s
 def _html_header(pv: dict) -> str:
     rows = [
         ('Run date',          pv.get('run_date')),
-        ('Tool',              pv.get('tool_version')),
+        ('PCR_strainer',      pv.get('tool_version')),
+        ('TNTBLAST',          pv.get('tntblast_version')),
         ('Reference genomes', f"{pv['total_genomes']:,} sequences" if pv.get('total_genomes') else None),
         ('Assay file',        pv.get('assay_file')),
         ('Genome file',       pv.get('genome_file')),
@@ -1434,30 +1354,6 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
             if detail_parts else ''
         )
 
-        warn_parts = []
-        if ol.get('omission_reason'):
-            warn_parts.append(_esc(str(ol['omission_reason'])))
-        if ol.get('omitted_variants', 0) > 0:
-            warn_parts.append(
-                f'{_fmt_n(int(ol["omitted_variants"]))} variant row(s) for this oligo '
-                'were omitted from the table below due to unsupported characters.'
-            )
-        if ol.get('threshold_omitted_variants', 0) > 0:
-            warn_parts.append(
-                f'{_fmt_n(int(ol["threshold_omitted_variants"]))} additional non-zero-error variant row(s) '
-                'for this oligo were omitted because they fell below the reporting threshold.'
-            )
-        warn_html = (
-            '<div class="warn"><strong>Report note:</strong> '
-            + ' '.join(warn_parts) + '</div>'
-            if warn_parts else ''
-        )
-
-        heatmap_html = (_heatmap_html(ol['seq'], ol['mm_pct'])
-                        if ol.get('available', True)
-                        else '<div class="warn"><strong>Heatmap unavailable:</strong> '
-                             'this oligo could not be rendered safely from the current input.</div>')
-
         parts.append(
             f'<div class="ob">'
             '<div class="oh">'
@@ -1466,10 +1362,9 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
             f'<span class="oseq">&nbsp;&middot;&nbsp;{_esc(ol["seq"])}</span>'
             '</div>'
             + detail_html +
-            warn_html +
             "<div class=\"ends\"><span>5'</span>"
             "<span style=\"flex:1\"></span><span>3'</span></div>"
-            + heatmap_html +
+            + _heatmap_html(ol['seq'], ol['mm_pct']) +
             '</div>\n'
         )
 
@@ -1540,29 +1435,6 @@ def _html_assay_card(a: dict, thresholds: dict, idx: int) -> str:
                 f'<td style="font-size:11px">{tm_cell}</td>'
                 f'<td style="font-size:11px;color:var(--text-m)">{_esc(interp)}</td>'
                 f'</tr>\n'
-            )
-
-        if ol.get('omitted_variants', 0) > 0:
-            has_variants = True
-            parts.append(
-                '<tr style="background:#FFF8E1">'
-                f'<td>{_oligo_tag(ol["type"])}</td>'
-                '<td colspan="5" style="font-size:11px;color:#6B4E00">'
-                f'{_fmt_n(int(ol["omitted_variants"]))} variant row(s) were omitted for this oligo '
-                'because the report parser encountered unsupported characters. '
-                'Review the log output and the TSV files before interpreting absence from this table as a clean result.'
-                '</td></tr>\n'
-            )
-
-        if ol.get('threshold_omitted_variants', 0) > 0:
-            has_variants = True
-            parts.append(
-                '<tr style="background:#F5F5F5">'
-                f'<td>{_oligo_tag(ol["type"])}</td>'
-                '<td colspan="5" style="font-size:11px;color:var(--text-m)">'
-                f'{_fmt_n(int(ol["threshold_omitted_variants"]))} additional non-zero-error variant row(s) '
-                'for this oligo were present in the full PCR results but are not shown here because they were below the configured reporting threshold.'
-                '</td></tr>\n'
             )
 
     if not has_variants:
@@ -1646,6 +1518,7 @@ def write_html_report(
         min_tm:             Optional[float] = None,
         variant_threshold:  Optional[float] = None,
         tool_version:       Optional[str]   = None,
+        tntblast_version:   Optional[str]   = None,
         pass_threshold:     float           = INCLUSIVITY_PASS,
         caution_threshold:  float           = INCLUSIVITY_CAUTION,
         file_mode:          int             = _OUTPUT_FILE_MODE,
@@ -1692,6 +1565,7 @@ def write_html_report(
         min_tm=min_tm,
         variant_threshold=variant_threshold,
         tool_version=tool_version or 'PCR_strainer',
+        tntblast_version=tntblast_version,
         pass_threshold=pass_threshold,
         caution_threshold=caution_threshold,
     )

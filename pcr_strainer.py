@@ -427,8 +427,10 @@ def parse_tntblast_output(assay_details, job_name, path_to_output, keep_tntblast
     if assay_details[5] == '' and assay_details[6] == '':
         tntblast_results['probe_site_seq'] = np.nan
     else:
-        tntblast_results['amplicon_range'] = tntblast_results['amplicon_range'].str.split(' .. ')
-        tntblast_results['probe_range']    = tntblast_results['probe_range'].str.split(' .. ')
+        tntblast_results['amplicon_range'] = tntblast_results['amplicon_range'].apply(
+            lambda x: x.split(' .. ') if isinstance(x, str) else x)
+        tntblast_results['probe_range']    = tntblast_results['probe_range'].apply(
+            lambda x: x.split(' .. ') if isinstance(x, str) else x)
         tntblast_results['probe_site_seq'] = tntblast_results.apply(get_probe_site, axis=1, result_type='reduce')
     # Re-order columns for final output.
     # amplicon_seq is kept here so write_amplicon_fasta() can use it;

@@ -77,7 +77,9 @@ def main():
     # Get tntblast results for each assay
     for assay_details in assays:
         run_TNTBLAST(assay_details, args['-g'], out_path, args['-m'], args['-p'], args['-P'])
-        tntblast_results = parse_tntblast_output(assay_details, name, out_path)
+        tntblast_results = parse_tntblast_output(
+            assay_details, name, out_path,
+            keep_tntblast_output=args['--keep-tntblast-output'])
         final_tntblast_results = pd.concat([final_tntblast_results, tntblast_results], sort=True)
     # Write report files
     write_assay_report(name, out_path, final_tntblast_results, args['-g'], args['-t'])
@@ -103,6 +105,10 @@ def main():
 
 
 def parse_args(args, version):
+    # Extract boolean flags before the generic key=value parser runs,
+    # so they are never seen as unrecognised arguments.
+    keep_tntblast = '--keep-tntblast-output' in args
+    args = [a for a in args if a != '--keep-tntblast-output']
     arg_values = {}
     for arg_1, arg_2 in zip(args[1:-1], args[2:]):
         if arg_1[0] == '-':
@@ -112,7 +118,6 @@ def parse_args(args, version):
                 arg_values[arg_1] = ''
     if args[-1][0] == '-':
         arg_values[args[-1]] = ''
-    # Set defaults, mins, and maxs
     required_args = {'-a', '-g', '-o'}
     arg_value_types = {'-a': str, '-g':str, '-o': str, '-t': float, '-m': float, '-p': float, '-P': float}
     min_arg_values = {'-t': 0, '-p': 0, '-P': 0}
@@ -169,6 +174,7 @@ def parse_args(args, version):
         if arg not in arg_values.keys():
             arg_values[arg] = value
     # Return keyword args and their values
+    arg_values['--keep-tntblast-output'] = keep_tntblast
     return arg_values
 
 
@@ -184,7 +190,10 @@ def print_usage(version):
     print(' -t : minimum prevalence (%) of primer site variants reported in reports (default=0, min > 0, max < 100)')
     print(' -m : minimum Tm (degrees C) for primers and probes (default=45)')
     print(' -p : molar concentration of primer oligos (uM) (default=1, min > 0)')
-    print(' -P : molar concentration of probe oligos (uM) (default=1, min > 0)\n')
+    print(' -P : molar concentration of probe oligos (uM) (default=1, min > 0)')
+    print('Diagnostic arguments:')
+    print(' --keep-tntblast-output : retain raw TNTBLAST output files (<assay>_tntblast_output.txt)')
+    print('                          in the output directory for inspection\n')
 
 
 def check_genomes_file(path_to_file):
@@ -297,7 +306,7 @@ def run_TNTBLAST(assay_details, path_to_genomes, path_to_output, melting_temp, p
     print()
 
 
-def parse_tntblast_output(assay_details, job_name, path_to_output):
+def parse_tntblast_output(assay_details, job_name, path_to_output, keep_tntblast_output=False):
     """Parses txt format output from TNTBLAST and tabulates relevant data into Pandas dataframes.
     Returns the dataframe."""
     # Create list of fields to capture from results.
@@ -428,8 +437,11 @@ def parse_tntblast_output(assay_details, job_name, path_to_output):
     cols = (['assay_name', 'target', 'amplicon_seq', 'total_errors', 'min_3prime_clamp']
             + [oligo + '_' + col for oligo in oligos for col in oligo_cols])
     tntblast_results = tntblast_results[cols]
-    # GARBAGE COLLECTION
-    os.remove(path_to_tntblast_txt_input)
+    # GARBAGE COLLECTION — skip if user asked to keep the raw TNTBLAST output
+    if keep_tntblast_output:
+        print(f'  Keeping raw TNTBLAST output: {path_to_tntblast_txt_input}')
+    else:
+        os.remove(path_to_tntblast_txt_input)
     print()
     return tntblast_results
 

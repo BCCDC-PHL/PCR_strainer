@@ -398,14 +398,14 @@ def parse_tntblast_output(assay_details, job_name, path_to_output, keep_tntblast
         fwd_primer_site_seq = row['amplicon_seq'][:site_length]
         fwd_primer_site_seq = write_oligo_site_variant(fwd_primer_seq, fwd_primer_site_seq)
         return fwd_primer_site_seq
-    tntblast_results['fwd_primer_site_seq'] = tntblast_results.apply(get_fwd_primer_site, axis=1)
+    tntblast_results['fwd_primer_site_seq'] = tntblast_results.apply(get_fwd_primer_site, axis=1, result_type='reduce')
     def get_rev_primer_site(row):
         rev_primer_seq = row['rev_primer_seq']
         site_length = len(row['rev_primer_seq']) + row['rev_primer_gaps']
         rev_primer_site_seq = rev_comp(row['amplicon_seq'][-site_length:])
         rev_primer_site_seq = write_oligo_site_variant(rev_primer_seq, rev_primer_site_seq)
         return rev_primer_site_seq
-    tntblast_results['rev_primer_site_seq'] = tntblast_results.apply(get_rev_primer_site, axis=1)
+    tntblast_results['rev_primer_site_seq'] = tntblast_results.apply(get_rev_primer_site, axis=1, result_type='reduce')
     def _count_matches(variant):
         """Count uppercase (matching) characters in a site variant string."""
         return sum(1 for c in variant if c.isupper())
@@ -429,7 +429,7 @@ def parse_tntblast_output(assay_details, job_name, path_to_output, keep_tntblast
     else:
         tntblast_results['amplicon_range'] = tntblast_results['amplicon_range'].str.split(' .. ')
         tntblast_results['probe_range']    = tntblast_results['probe_range'].str.split(' .. ')
-        tntblast_results['probe_site_seq'] = tntblast_results.apply(get_probe_site, axis=1)
+        tntblast_results['probe_site_seq'] = tntblast_results.apply(get_probe_site, axis=1, result_type='reduce')
     # Re-order columns for final output.
     # amplicon_seq is kept here so write_amplicon_fasta() can use it;
     # write_tntblast_results() drops it when writing the PCR_results TSV.

@@ -407,8 +407,26 @@ def parse_tntblast_output(assay_details, job_name, path_to_output, keep_tntblast
         return rev_primer_site_seq
     tntblast_results['rev_primer_site_seq'] = tntblast_results.apply(get_rev_primer_site, axis=1, result_type='reduce')
     def _count_matches(variant):
-        """Count uppercase (matching) characters in a site variant string."""
-        return sum(1 for c in variant if c.isupper())
+        """Count uppercase matching characters, excluding insertions.
+
+        In write_oligo_site_variant notation, (X) denotes a genomic
+        insertion relative to the probe — the characters inside the
+        parentheses are uppercase but do NOT represent oligo matches.
+        Counting them as matches causes the wrong strand to be selected
+        when a probe binds the antisense strand and the sense alignment
+        produces many insertions whose uppercase chars outweigh the real
+        matches in the correct antisense alignment.
+        """
+        inside_insertion = False
+        count = 0
+        for c in variant:
+            if c == '(':
+                inside_insertion = True
+            elif c == ')':
+                inside_insertion = False
+            elif not inside_insertion and c.isupper():
+                count += 1
+        return count
 
     def get_probe_site(row):
         probe_start = int(row['probe_range'][0]) - int(row['amplicon_range'][0])

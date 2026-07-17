@@ -86,6 +86,8 @@ If you use PCR_strainer in your work, please cite the original publications:
 | numpy | Numerical operations |
 | matplotlib | Chart rendering in the HTML report (Agg backend — no display required) |
 
+> **pandas compatibility:** PCR_strainer is compatible with pandas ≥ 1.0 and has been tested with pandas 2.x. Several pandas 2.0 API changes are handled explicitly in the code.
+
 All Python dependencies are available via conda-forge or pip and are standard in most scientific Python environments (Anaconda, conda-forge).
 
 ---
@@ -139,6 +141,12 @@ python pcr_strainer.py \
 | `-t` | 0 | Minimum prevalence (%) of variants to include in reports. `0` reports everything; must be `> 0` and `< 100` if set |
 | `-p` | 1 | Molar concentration of primer oligos (µM) |
 | `-P` | 1 | Molar concentration of probe oligos (µM) |
+
+### Diagnostic arguments
+
+| Flag | Description |
+|---|---|
+| `--keep-tntblast-output` | Retain the raw TNTBLAST output file for each assay (`<assay>_tntblast_output.txt`) in the output directory. Useful for diagnosing unexpected results in site sequence alignment or probe orientation. Files are deleted after parsing by default. |
 
 ### Example
 
@@ -377,7 +385,7 @@ However, the site-variant notation field (`*_site_seq`) is produced by a charact
 
 **Probe Tm with MGB or LNA modifications:** TNTBLAST calculates Tm from nearest-neighbour thermodynamics for unmodified DNA. Probes with minor groove binder (MGB) or locked nucleic acid (LNA) modifications have experimentally higher Tms — typically 15–20 °C higher for MGB probes. The Tm values reported in `PCR_results.tsv` and the HTML report reflect the unmodified calculation and should be interpreted accordingly. Sequences that fall below the `-m` threshold due to this underestimate will appear in the missed sequences report rather than the variant report.
 
-**Probe strand orientation:** PCR_strainer automatically detects probe strand orientation by aligning the extracted amplicon site in both orientations and selecting the one with more matching positions. Ensure the probe sequence in your assay CSV is supplied 5′ → 3′ as written (not pre-reverse-complemented).
+**Probe strand orientation:** PCR_strainer automatically detects probe strand orientation by trying both sense and antisense alignments and selecting the one with more real matching positions (insertion annotations in parentheses are excluded from the match count to avoid false positives). Supply probe sequences 5′ → 3′ as written — do not pre-reverse-complement them.
 
 ---
 
@@ -400,7 +408,21 @@ git push origin v0.2.5
 
 ## Changelog
 
-### v0.2.7 (BCCDC-PHL)
+### v0.2.8 (BCCDC-PHL)
+- Fixed probe strand auto-detection: `_count_matches` was incorrectly counting
+  uppercase characters inside `(X)` insertion annotations as matches, causing
+  antisense probes to be reported in the wrong orientation when the garbled
+  sense alignment accumulated more apparent 'matches' via insertions than the
+  correct antisense alignment had real matches
+- Added `--keep-tntblast-output` flag to retain raw TNTBLAST output files
+  for diagnostic inspection
+- Fixed `ValueError: All arrays must be of the same length` caused by
+  `probe strand` not being consistently present in all TNTBLAST versions;
+  probe strand is now auto-detected from alignment quality
+- Fixed `ValueError: Cannot set a DataFrame with multiple columns` on
+  pandas ≥ 2.0: added `result_type='reduce'` to all `.apply()` calls
+- Fixed `AttributeError: Can only use .str accessor with string values`
+  on pandas ≥ 2.0: replaced `.str.split()` with `.apply()` lambda
 - Renamed `PCR_strainer_v_0_2_4.py` → `pcr_strainer.py`; version now stored as `__version__` at module level
 - Added new TNTBLAST output fields: `fwd_primer_tm`, `rev_primer_tm`, `probe_tm`, `min_3prime_clamp`
 - Added `pcr_strainer_report.py`: self-contained static HTML summary report with no JavaScript

@@ -406,42 +406,24 @@ def parse_tntblast_output(assay_details, job_name, path_to_output, keep_tntblast
         rev_primer_site_seq = write_oligo_site_variant(rev_primer_seq, rev_primer_site_seq)
         return rev_primer_site_seq
     tntblast_results['rev_primer_site_seq'] = tntblast_results.apply(get_rev_primer_site, axis=1, result_type='reduce')
-    def _count_matches(variant):
-        """Count uppercase matching characters, excluding insertions.
-
-        In write_oligo_site_variant notation, (X) denotes a genomic
-        insertion relative to the probe — the characters inside the
-        parentheses are uppercase but do NOT represent oligo matches.
-        Counting them as matches causes the wrong strand to be selected
-        when a probe binds the antisense strand and the sense alignment
-        produces many insertions whose uppercase chars outweigh the real
-        matches in the correct antisense alignment.
-        """
-        inside_insertion = False
-        count = 0
-        for c in variant:
-            if c == '(':
-                inside_insertion = True
-            elif c == ')':
-                inside_insertion = False
-            elif not inside_insertion and c.isupper():
-                count += 1
-        return count
-
     def get_probe_site(row):
         probe_start = int(row['probe_range'][0]) - int(row['amplicon_range'][0])
         probe_length = int(row['probe_range'][1]) - int(row['probe_range'][0]) + row['probe_gaps'] + 1
         probe_end = probe_start + probe_length
         probe_site_seq = row['amplicon_seq'][probe_start:probe_end]
-        # Try both strand orientations and keep whichever produces more
-        # matching positions.  This avoids relying on TNTBLAST to output
-        # an explicit 'probe strand' field, which is not consistently
-        # present across all TNTBLAST versions.
-        sense_variant    = write_oligo_site_variant(row['probe_seq'], probe_site_seq)
-        antisense_variant = write_oligo_site_variant(row['probe_seq'], rev_comp(probe_site_seq))
-        if _count_matches(antisense_variant) > _count_matches(sense_variant):
-            return antisense_variant
-        return sense_variant
+        site_rc = rev_comp(probe_site_seq)
+        # Determine orientation by direct character comparison BEFORE
+        # calling write_oligo_site_variant.  Comparing the probe to the
+        # raw site sequence and its reverse complement avoids relying on
+        # the alignment algorithm output, which can be fooled when the
+        # wrong-strand alignment produces many insertion annotations
+        # (uppercase chars inside parentheses) that inflate match counts.
+        probe_upper = row['probe_seq'].upper()
+        sense_matches    = sum(a == b for a, b in zip(probe_upper, probe_site_seq.upper()))
+        antisense_matches = sum(a == b for a, b in zip(probe_upper, site_rc.upper()))
+        if antisense_matches > sense_matches:
+            return write_oligo_site_variant(row['probe_seq'], site_rc)
+        return write_oligo_site_variant(row['probe_seq'], probe_site_seq)
     if assay_details[5] == '' and assay_details[6] == '':
         tntblast_results['probe_site_seq'] = np.nan
     else:

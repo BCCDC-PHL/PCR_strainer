@@ -180,6 +180,7 @@ assay_name,fwd_primer_name,fwd_primer_seq,rev_primer_name,rev_primer_seq
 **Rules:**
 - All oligo sequences should be written 5′ → 3′
 - IUPAC degenerate bases are permitted (A T G C W S M K R Y B V D H N)
+- Probe sequences should be entered 5′ → 3′ as written — PCR_strainer automatically detects whether the probe binds the sense or antisense strand and handles orientation accordingly
 - FASTA headers in the reference genome file must be unique
 - Assay names and all oligo names must be unique across the entire file
 
@@ -385,7 +386,9 @@ However, the site-variant notation field (`*_site_seq`) is produced by a charact
 
 **Probe Tm with MGB or LNA modifications:** TNTBLAST calculates Tm from nearest-neighbour thermodynamics for unmodified DNA. Probes with minor groove binder (MGB) or locked nucleic acid (LNA) modifications have experimentally higher Tms — typically 15–20 °C higher for MGB probes. The Tm values reported in `PCR_results.tsv` and the HTML report reflect the unmodified calculation and should be interpreted accordingly. Sequences that fall below the `-m` threshold due to this underestimate will appear in the missed sequences report rather than the variant report.
 
-**Probe strand orientation:** PCR_strainer automatically detects probe strand orientation by trying both sense and antisense alignments and selecting the one with more real matching positions (insertion annotations in parentheses are excluded from the match count to avoid false positives). Supply probe sequences 5′ → 3′ as written — do not pre-reverse-complement them.
+**Probe strand orientation:** PCR_strainer automatically detects whether each probe binds the sense or antisense strand. For each genome hit, the probe binding site is extracted from the TNTBLAST amplicon sequence (always reported on the sense strand). The probe sequence is then compared directly — character by character — against both the extracted site and its reverse complement, before any alignment is performed. Whichever orientation produces more exact character matches is used for the final alignment and mismatch annotation. For a typical 20–30 bp probe the margin between the correct orientation (~26–29 matches) and the wrong one (~5–12 accidental matches) is large enough to make this determination unambiguous.
+
+Supply probe sequences 5′ → 3′ as written in your assay design — do not pre-reverse-complement them before entering them in the assay CSV. PCR_strainer handles orientation automatically regardless of which strand the probe binds.
 
 ---
 
@@ -408,12 +411,14 @@ git push origin v0.2.5
 
 ## Changelog
 
-### v0.2.8 (BCCDC-PHL)
-- Fixed probe strand auto-detection: `_count_matches` was incorrectly counting
-  uppercase characters inside `(X)` insertion annotations as matches, causing
-  antisense probes to be reported in the wrong orientation when the garbled
-  sense alignment accumulated more apparent 'matches' via insertions than the
-  correct antisense alignment had real matches
+### v0.2.9 (BCCDC-PHL)
+- Fixed probe strand auto-detection: replaced the alignment-quality heuristic
+  (`_count_matches`) with a direct character-by-character comparison of the
+  probe sequence against the raw extracted site and its reverse complement,
+  performed before calling the alignment function. The previous approach was
+  unreliable because the alignment algorithm could find coincidental shared
+  k-mers between a probe and its own reverse complement, inflating the
+  wrong-strand match count
 - Added `--keep-tntblast-output` flag to retain raw TNTBLAST output files
   for diagnostic inspection
 - Fixed `ValueError: All arrays must be of the same length` caused by

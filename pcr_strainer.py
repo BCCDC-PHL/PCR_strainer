@@ -2,13 +2,13 @@
 
 # PCR_strainer - A tool for assessing inclusivity of PCR primers and probes against reference nucleotide sequences
 #
-# Kevin Kuchinski
+# Tool original developed by Kevin Kuchinski (https://github.com/KevinKuchinski/PCR_strainer) with 
+# Susbequent development by James Zlosnik
 # British Columbia Centre for Disease Control, Public Health Laboratory
 # University of British Columbia, Department of Pathology and Laboratory Medicine
-# kevin.kuchinski@bccdc.ca
-
+#
 # Version is stored here at module level — a single source of truth.
-# Do not encode the version in the filename; use git tags for releases:
+# Do not encode the version in the filename; use git tags for releases, e.g.:
 #   git tag -a v0.2.5 -m "Description" && git push origin v0.2.5
 __version__ = '0.2.10'
 
@@ -56,8 +56,8 @@ def get_tntblast_version() -> str:
 
 
 # Safe character set for assay and oligo names.
-# Names appear in file paths; restricting characters prevents shell
-# injection (security finding F-01) and filesystem path manipulation.
+# Names appear in file paths; restricting characters to prevent shell
+# injection and filesystem path manipulation.
 _SAFE_NAME_RE = re.compile(r'^[\w\-.]{1,100}$')
 
 
@@ -294,15 +294,10 @@ def read_assay_file(path_to_file):
 def run_TNTBLAST(assay_details, path_to_genomes, path_to_output, melting_temp, primer_molarity, probe_molarity):
     """Run TNTBLAST with provided assay details.
 
-    Security notes
-    --------------
     shell=False: arguments are passed directly to the OS without shell
-    interpretation, preventing command injection via assay names or file paths
-    (security finding F-01).
+    interpretation, preventing command injection via assay names or file paths.
 
-    tempfile: the assay input file is created with a random name via
-    tempfile.NamedTemporaryFile, preventing predictable-filename races on
-    shared HPC filesystems (security finding F-03).
+    tempfile: the assay input file is created with a random name.
     """
     import tempfile
     assay_name = assay_details[0]
@@ -317,8 +312,7 @@ def run_TNTBLAST(assay_details, path_to_genomes, path_to_output, melting_temp, p
         [assay_name, fwd_primer_seq, rev_primer_seq]
         + ([probe_seq] if probe_seq != '' else [])
     )
-    # Write assay to a randomly-named temporary file (F-03: avoids predictable
-    # filenames on shared filesystems that could be exploited by race conditions).
+    # Write assay to a randomly-named temporary file.
     path_to_tntblast_txt_output = os.path.join(
         path_to_output, assay_name + '_tntblast_output.txt')
     tmp_assay = tempfile.NamedTemporaryFile(
@@ -327,8 +321,7 @@ def run_TNTBLAST(assay_details, path_to_genomes, path_to_output, melting_temp, p
     try:
         tmp_assay.write(assay_line + '\n')
         tmp_assay.close()
-        # Run TNTBLAST with shell=False (F-01: no shell injection possible).
-        # Arguments are passed as a list — the OS receives them verbatim.
+        # Run TNTBLAST.
         completed_process = subprocess.run(
             [
                 'tntblast',
@@ -344,7 +337,7 @@ def run_TNTBLAST(assay_details, path_to_genomes, path_to_output, melting_temp, p
                 '-v', 'F',
             ],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,   # F-05: capture stderr for logging
+            stderr=subprocess.PIPE,   
             shell=False,
         )
     finally:
@@ -353,7 +346,7 @@ def run_TNTBLAST(assay_details, path_to_genomes, path_to_output, melting_temp, p
             os.remove(tmp_assay.name)
         except OSError:
             pass
-    # F-05: log any TNTBLAST warnings to stderr for the audit trail
+    # Log any TNTBLAST warnings to stderr for the audit trail
     if completed_process.stderr:
         import logging
         _log = logging.getLogger('pcr_strainer')

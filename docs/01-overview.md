@@ -16,13 +16,13 @@ Regular inclusivity monitoring using PCR_strainer provides:
 
 - **Evidence that your assay continues to perform as validated** — documented surveillance forms part of the ongoing quality record for an accredited test.
 - **Early warning of emerging variants** — a shift from 0% to 5% prevalence of a probe-site mutation in circulating sequences warrants monitoring, even if clinical sensitivity is not yet visibly affected.
-- **Actionable intelligence** — the report identifies exactly which position in which oligo is mutated, how prevalent that mutation is, and whether the position is near the 3′ end where it is most likely to affect amplification.
+- **Actionable intelligence** — the report identifies exactly which position in which oligo is mutated, how prevalent that mutation is in the dataset that was provided, and whether the position is near the 3′ end where it is most likely to affect amplification.
 
 ---
 
 ## What this tool is not
 
-PCR_strainer is a **computational surveillance tool**, not a diagnostic instrument. Its outputs are based on available reference genome sequences, which may not fully represent all strains circulating in any given region or patient population.
+PCR_strainer is a **computational surveillance tool**, not a diagnostic instrument. Its outputs are based on available reference genome sequences, which may not fully represent all strains circulating in any given region or patient population.  The selection of these references is therefore important.
 
 Results from PCR_strainer:
 
@@ -56,6 +56,7 @@ PCR_strainer is intended for use by laboratory scientists and bioinformaticians 
 | **07-how-it-works.md** | Bioinformaticians | Algorithms, thermodynamic model, probe handling |
 | **08-validation-and-limitations.md** | QA managers, accreditation | Validation approach, known limitations, QC |
 | **09-troubleshooting.md** | Bioinformaticians | Common errors and solutions |
+| **10-security-review.md** | Security, IT, QA | Formal security review findings and remediation status |
 
 ---
 

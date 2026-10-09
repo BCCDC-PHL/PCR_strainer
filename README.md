@@ -1,6 +1,9 @@
 # PCR_strainer
 
-PCR_strainer assesses the inclusivity of primer and probe oligonucleotides from diagnostic qPCR assays and amplicon sequencing schemes against large sets of reference genome sequences. It wraps [thermonucleotideBLAST (TNTBLAST)](https://github.com/jgans/thermonucleotideBLAST), which aligns query oligonucleotides to subject sequences with a thermodynamic model, and produces tabular reports and a self-contained HTML summary report suitable for sharing with laboratory staff.
+PCR_strainer assesses the inclusivity of primer and probe oligonucleotides from diagnostic qPCR assays and amplicon sequencing schemes against large sets of reference genome sequences.
+
+> **Full documentation** is in the [`docs/`](docs/) folder — covering installation, input preparation, output interpretation, algorithm details, validation guidance for accredited laboratories, and a security review.
+
 
 This is the BCCDC-PHL fork of [Kevin Kuchinski's PCR_strainer](https://github.com/KevinKuchinski/PCR_strainer), extended with additional TNTBLAST output fields, a static HTML summary report, and a more maintainable code structure.
 
@@ -200,8 +203,6 @@ PCR_strainer expects DNA sequences in FASTA format.
 - FASTA headers must be unique and must not contain spaces
 - For single-stranded RNA genomes (influenza, SARS-CoV-2, etc.), ensure all sequences represent the same strand sense (e.g. all coding/positive sense)
 - TNTBLAST does not expand degenerate nucleotides in subject sequences. Sequences with degenerate bases in primer binding sites may produce false negatives; consider filtering these out before running
-
-**Data governance note:** If your reference genomes were downloaded from GISAID, the variant sequences reported in the HTML report are derived from GISAID-restricted data. Review GISAID's terms of service before distributing this report beyond your immediate team. Genomes sourced from NCBI/GenBank carry no such restriction.
 
 ---
 
@@ -411,7 +412,21 @@ git push origin v0.2.5
 
 ## Changelog
 
-### v0.2.9 (BCCDC-PHL)
+### v0.2.10 (BCCDC-PHL)
+- **Security (F-01):** Fixed shell command injection — `run_TNTBLAST()` now uses
+  `shell=False` with a list-form command. Assay and oligo names are validated
+  against `^[\w\-.]{1,100}$` in `read_assay_file()` before any file or process
+  operations, rejecting shell metacharacters, spaces, and slashes
+- **Security (F-03):** TNTBLAST assay input file now created with
+  `tempfile.NamedTemporaryFile()` (random name, `try/finally` cleanup) instead
+  of a predictable filename on the shared HPC filesystem
+- **Security (F-05):** TNTBLAST stderr now captured via `subprocess.PIPE`;
+  printed on error, logged at DEBUG level on success for audit trail
+- Added `docs/` folder: nine documentation files covering overview, installation,
+  input preparation, running the pipeline, output reference, report interpretation,
+  algorithm details, validation and limitations, and troubleshooting
+- Added `docs/10-security-review.md`: formal security review with nine findings,
+  remediation status, and deployment guidance
 - Fixed probe strand auto-detection: replaced the alignment-quality heuristic
   (`_count_matches`) with a direct character-by-character comparison of the
   probe sequence against the raw extracted site and its reverse complement,

@@ -36,7 +36,7 @@ This runs all assays in `assays.csv` against `genomes.fasta` and writes output f
 
 | Flag | Description |
 |---|---|
-| `--keep-tntblast-output` | Retain the raw TNTBLAST output text file for each assay (`<assay_name>_tntblast_output.txt`) in the output directory after parsing. By default these are deleted. Useful for diagnosing unexpected alignment results — see [Troubleshooting](08-troubleshooting.md). |
+| `--keep-tntblast-output` | Retain the raw TNTBLAST output text file for each assay (`<assay_name>_tntblast_output.txt`) in the output directory after parsing. By default these are deleted. Useful for diagnosing unexpected alignment results — see [Troubleshooting](09-troubleshooting.md). |
 
 ---
 

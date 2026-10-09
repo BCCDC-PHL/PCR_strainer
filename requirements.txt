@@ -1,0 +1,9 @@
+# PCR_strainer Python dependencies
+# Install with: pip install -r requirements.txt
+#
+# Note: TNTBLAST must be installed separately from source:
+#   https://github.com/jgans/thermonucleotideBLAST
+
+pandas>=1.0
+numpy
+matplotlib

@@ -10,8 +10,9 @@
 # Version is stored here at module level — a single source of truth.
 # Do not encode the version in the filename; use git tags for releases:
 #   git tag -a v0.2.5 -m "Description" && git push origin v0.2.5
-__version__ = '0.2.5'
+__version__ = '0.2.10'
 
+import re
 import sys
 import subprocess
 import os
@@ -52,6 +53,12 @@ def get_tntblast_version() -> str:
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
     return 'unknown'
+
+
+# Safe character set for assay and oligo names.
+# Names appear in file paths; restricting characters prevents shell
+# injection (security finding F-01) and filesystem path manipulation.
+_SAFE_NAME_RE = re.compile(r'^[\w\-.]{1,100}$')
 
 
 def main():
@@ -255,6 +262,15 @@ def read_assay_file(path_to_file):
                     print(','.join(line))
                     print()
                     exit(1)
+                for name in names:
+                    if not _SAFE_NAME_RE.match(name):
+                        print(f'\nERROR: Assay and oligo names may only contain '
+                              f'letters, digits, hyphens, dots, and underscores '
+                              f'(max 100 characters).')
+                        print(f'  Offending name: {name!r}')
+                        print(f'  Line: {",".join(line)}')
+                        print()
+                        exit(1)
                 # Check if oligo seqs contain invalid bases
                 bases = 'ATGCWSMKRYBVDHN'
                 for oligo, seq in zip(['fwd primer', 'rev primer', 'probe'], [fwd_primer_seq, rev_primer_seq, probe_seq]):
@@ -276,8 +292,19 @@ def read_assay_file(path_to_file):
 
 
 def run_TNTBLAST(assay_details, path_to_genomes, path_to_output, melting_temp, primer_molarity, probe_molarity):
-    """Run TNTBLAST with provided assay details."""
-    # Create TNTBLAST assay file from assay details (TSV file of assay name and oligo seqs)
+    """Run TNTBLAST with provided assay details.
+
+    Security notes
+    --------------
+    shell=False: arguments are passed directly to the OS without shell
+    interpretation, preventing command injection via assay names or file paths
+    (security finding F-01).
+
+    tempfile: the assay input file is created with a random name via
+    tempfile.NamedTemporaryFile, preventing predictable-filename races on
+    shared HPC filesystems (security finding F-03).
+    """
+    import tempfile
     assay_name = assay_details[0]
     fwd_primer_seq = assay_details[2]
     rev_primer_seq = assay_details[4]
@@ -286,23 +313,61 @@ def run_TNTBLAST(assay_details, path_to_genomes, path_to_output, melting_temp, p
     print(f'Fwd primer seq: {fwd_primer_seq}\nRev primer seq: {rev_primer_seq}')
     if probe_seq != '':
         print(f'Probe seq: {probe_seq}')
-    assay = [assay_name, fwd_primer_seq, rev_primer_seq]
-    assay += [probe_seq] if probe_seq != '' else []
-    assay = '\t'.join(assay)
-    path_to_tntblast_assay = os.path.join(path_to_output, assay_name + '_tntblast_assay.tsv')
-    with open(path_to_tntblast_assay, 'w') as output_file:
-        output_file.write(assay + '\n')
-    # Create terminal command for TNTBLAST and run
-    path_to_tntblast_txt_output = os.path.join(path_to_output, assay_name + '_tntblast_output.txt')
-    terminal_command = (f'tntblast -i {path_to_tntblast_assay} -d {path_to_genomes} -o {path_to_tntblast_txt_output}'
-                        f' -e {melting_temp} -E {melting_temp} -t {primer_molarity / 1000000} -T {probe_molarity / 1000000}'
-                        f' --best-match -m 0 -v F')
-    completed_process = subprocess.run(terminal_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
+    assay_line = '\t'.join(
+        [assay_name, fwd_primer_seq, rev_primer_seq]
+        + ([probe_seq] if probe_seq != '' else [])
+    )
+    # Write assay to a randomly-named temporary file (F-03: avoids predictable
+    # filenames on shared filesystems that could be exploited by race conditions).
+    path_to_tntblast_txt_output = os.path.join(
+        path_to_output, assay_name + '_tntblast_output.txt')
+    tmp_assay = tempfile.NamedTemporaryFile(
+        mode='w', suffix='_tntblast_assay.tsv',
+        dir=path_to_output, delete=False)
+    try:
+        tmp_assay.write(assay_line + '\n')
+        tmp_assay.close()
+        # Run TNTBLAST with shell=False (F-01: no shell injection possible).
+        # Arguments are passed as a list — the OS receives them verbatim.
+        completed_process = subprocess.run(
+            [
+                'tntblast',
+                '-i', tmp_assay.name,
+                '-d', path_to_genomes,
+                '-o', path_to_tntblast_txt_output,
+                '-e', str(melting_temp),
+                '-E', str(melting_temp),
+                '-t', str(primer_molarity / 1_000_000),
+                '-T', str(probe_molarity / 1_000_000),
+                '--best-match',
+                '-m', '0',
+                '-v', 'F',
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,   # F-05: capture stderr for logging
+            shell=False,
+        )
+    finally:
+        # Always clean up the temporary assay file
+        try:
+            os.remove(tmp_assay.name)
+        except OSError:
+            pass
+    # F-05: log any TNTBLAST warnings to stderr for the audit trail
+    if completed_process.stderr:
+        import logging
+        _log = logging.getLogger('pcr_strainer')
+        _log.debug('TNTBLAST stderr for %s:\n%s',
+                   assay_name,
+                   completed_process.stderr.decode('utf-8', errors='replace'))
     if completed_process.returncode != 0:
-        print(f'\nERROR: TNTBLAST terminated with errors.\nTNTBLAST error code: {completed_process.returncode}\n')
+        tntblast_err = completed_process.stderr.decode('utf-8', errors='replace').strip()
+        print(f'\nERROR: TNTBLAST terminated with errors.')
+        print(f'TNTBLAST error code: {completed_process.returncode}')
+        if tntblast_err:
+            print(f'TNTBLAST output:\n{tntblast_err}')
+        print()
         exit(1)
-    # GARBAGE COLLECTION (remove TNTBLAST assay TSV file)
-    os.remove(path_to_tntblast_assay)
     print()
 
 

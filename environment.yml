@@ -1,0 +1,9 @@
+name: pcrstrainer
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python>=3.8
+  - pandas>=1.0
+  - numpy
+  - matplotlib

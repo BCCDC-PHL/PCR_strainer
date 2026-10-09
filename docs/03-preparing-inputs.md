@@ -20,14 +20,6 @@ assay_name,fwd_primer_name,fwd_primer_seq,rev_primer_name,rev_primer_seq,probe_n
 assay_name,fwd_primer_name,fwd_primer_seq,rev_primer_name,rev_primer_seq
 ```
 
-### Example
-
-```
-FluA_RP1,FluA-RP1-F,AAGCATTCCCAATGACAAACC,FluA-RP1-R,TCTCCCACTTGCAAAGTTGG,FluA-RP1-P,CAGGATCACATATGGGGCCTGTCCCAG
-SARS2_E,E-Sarbeco-F,ACAGGTACGTTAATAGTTAATAGCGT,E-Sarbeco-R,ATATTGCAGCAGTACGCACACA,E-Sarbeco-P,ACACTAGCCATCCTTACTGCGCTTCG
-FluB_NS,FluB-F,TCCTCAAYTTCAGTCAAGATGTTC,FluB-R,ACTTCAATTCTGCAAAGGTGTTTTC
-```
-
 ### Rules
 
 **Sequences:**

@@ -10,13 +10,14 @@
 # Version is stored here at module level — a single source of truth.
 # Do not encode the version in the filename; use git tags for releases, e.g.:
 #   git tag -a v0.2.5 -m "Description" && git push origin v0.2.5
-__version__ = '0.2.10'
+__version__ = '0.2.11'
 
 import re
 import sys
 import subprocess
 import os
 import numpy as np
+from functools import lru_cache
 import pandas as pd
 
 
@@ -59,6 +60,26 @@ def get_tntblast_version() -> str:
 # Names appear in file paths; restricting characters to prevent shell
 # injection and filesystem path manipulation.
 _SAFE_NAME_RE = re.compile(r'^[\w\-.]{1,100}$')
+
+# Maximum oligo length (nt). Bounds the cost of the gapped alignment fallback
+# and rejects malformed assay files; real primers/probes are well under 100 nt.
+_MAX_OLIGO_LEN = 200
+
+# IUPAC degenerate base lookup: oligo base -> set of genome bases it matches.
+_IUPAC = {
+    'A': {'A'}, 'T': {'T'}, 'G': {'G'}, 'C': {'C'},
+    'R': {'A', 'G'}, 'Y': {'C', 'T'}, 'S': {'G', 'C'}, 'W': {'A', 'T'},
+    'K': {'G', 'T'}, 'M': {'A', 'C'},
+    'B': {'C', 'G', 'T'}, 'D': {'A', 'G', 'T'},
+    'H': {'A', 'C', 'T'}, 'V': {'A', 'C', 'G'},
+    'N': {'A', 'C', 'G', 'T'},
+}
+
+
+def _iupac_match(oligo_base, genome_base):
+    """True if genome_base is covered by oligo_base (IUPAC-aware)."""
+    o, g = oligo_base.upper(), genome_base.upper()
+    return g in _IUPAC.get(o, {o})
 
 
 def main():
@@ -279,6 +300,12 @@ def read_assay_file(path_to_file):
                         print(seq)
                         print()
                         exit(1)
+                    if len(seq) > _MAX_OLIGO_LEN:
+                        print(f'\nERROR: Oligo seq for {oligo} is {len(seq)} nt; '
+                              f'maximum allowed is {_MAX_OLIGO_LEN} nt.')
+                        print(f'  Assay: {assay_name}')
+                        print()
+                        exit(1)
                 # Create assay info tuple and append to assays list
                 assay = (assay_name, fwd_primer_name, fwd_primer_seq, rev_primer_name, rev_primer_seq, probe_name, probe_seq)
                 assays.append(assay)
@@ -454,14 +481,14 @@ def parse_tntblast_output(assay_details, job_name, path_to_output, keep_tntblast
         fwd_primer_seq = row['fwd_primer_seq']
         site_length = len(row['fwd_primer_seq']) + row['fwd_primer_gaps']
         fwd_primer_site_seq = row['amplicon_seq'][:site_length]
-        fwd_primer_site_seq = write_oligo_site_variant(fwd_primer_seq, fwd_primer_site_seq)
+        fwd_primer_site_seq = write_oligo_site_variant(fwd_primer_seq, fwd_primer_site_seq, row['fwd_primer_gaps'])
         return fwd_primer_site_seq
     tntblast_results['fwd_primer_site_seq'] = tntblast_results.apply(get_fwd_primer_site, axis=1, result_type='reduce')
     def get_rev_primer_site(row):
         rev_primer_seq = row['rev_primer_seq']
         site_length = len(row['rev_primer_seq']) + row['rev_primer_gaps']
         rev_primer_site_seq = rev_comp(row['amplicon_seq'][-site_length:])
-        rev_primer_site_seq = write_oligo_site_variant(rev_primer_seq, rev_primer_site_seq)
+        rev_primer_site_seq = write_oligo_site_variant(rev_primer_seq, rev_primer_site_seq, row['rev_primer_gaps'])
         return rev_primer_site_seq
     tntblast_results['rev_primer_site_seq'] = tntblast_results.apply(get_rev_primer_site, axis=1, result_type='reduce')
     def get_probe_site(row):
@@ -477,11 +504,11 @@ def parse_tntblast_output(assay_details, job_name, path_to_output, keep_tntblast
         # wrong-strand alignment produces many insertion annotations
         # (uppercase chars inside parentheses) that inflate match counts.
         probe_upper = row['probe_seq'].upper()
-        sense_matches    = sum(a == b for a, b in zip(probe_upper, probe_site_seq.upper()))
-        antisense_matches = sum(a == b for a, b in zip(probe_upper, site_rc.upper()))
+        sense_matches    = sum(_iupac_match(a, b) for a, b in zip(probe_upper, probe_site_seq))
+        antisense_matches = sum(_iupac_match(a, b) for a, b in zip(probe_upper, site_rc))
         if antisense_matches > sense_matches:
-            return write_oligo_site_variant(row['probe_seq'], site_rc)
-        return write_oligo_site_variant(row['probe_seq'], probe_site_seq)
+            return write_oligo_site_variant(row['probe_seq'], site_rc, row['probe_gaps'])
+        return write_oligo_site_variant(row['probe_seq'], probe_site_seq, row['probe_gaps'])
     if assay_details[5] == '' and assay_details[6] == '':
         tntblast_results['probe_site_seq'] = np.nan
     else:
@@ -647,77 +674,84 @@ def write_variant_report(job_name, path_to_output, tntblast_results, path_to_gen
     variant_report[cols].to_csv(path_to_report_file, sep='\t', index=False)
 
 
-def longest_common_kmer(seq_1, seq_2):
-    enum_kmers = lambda seq, k: set(seq[i:i+k] for i in range(len(seq) - k + 1))
-    common_kmers = lambda seq_1, seq_2, k: enum_kmers(seq_1, k) & enum_kmers(seq_2, k)
-    uniq_kmer = lambda seq_1, seq_2, kmer: True if seq_1.count(kmer) == 1 and seq_2.count(kmer) == 1 else False
-    l = min(len(seq_1), len(seq_2))
-    k = [kmer for kmer in common_kmers(seq_1, seq_2, l) if uniq_kmer(seq_1, seq_2, kmer) == True]
-    while l > 0 and len(k) == 0:
-        l -= 1
-        k = [kmer for kmer in common_kmers(seq_1, seq_2, l) if uniq_kmer(seq_1, seq_2, kmer) == True]
-    if len(k) > 0:
-        return k[0]
-    else:
-        return None
+# Needleman-Wunsch scoring for the gapped fallback.
+# Mismatches are cheaper than gaps so that a substitution is preferred over a
+# deletion+insertion pair; a degenerate match scores the same as an exact match.
+_NW_MATCH    =  2
+_NW_MISMATCH = -1
+_NW_GAP      = -2
 
 
-def align_seqs(seq_1, seq_2):
-    if type(seq_1) != list:
-        seq_1 = [seq_1]
-    if type(seq_2) != list:
-        seq_2 = [seq_2]
-    new_seq_1 = []
-    new_seq_2 = []
-    for sub_seq_1, sub_seq_2 in zip(seq_1, seq_2):
-        if sub_seq_1 == sub_seq_2:
-            k = None
+@lru_cache(maxsize=65536)
+def _nw_align(oligo_seq, site_seq):
+    """Global (Needleman-Wunsch) alignment of an oligo to its genome site.
+
+    IUPAC-aware: a genome base covered by a degenerate oligo base counts as a
+    match. Returns two equal-length strings (oligo_aligned, site_aligned) with
+    '-' marking gaps. Cached, because many genomes share identical sites.
+    """
+    o = oligo_seq.upper()
+    g = site_seq.upper()
+    n, m = len(o), len(g)
+
+    # Score matrix
+    score = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        score[i][0] = i * _NW_GAP
+    for j in range(1, m + 1):
+        score[0][j] = j * _NW_GAP
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            sub = _NW_MATCH if _iupac_match(o[i - 1], g[j - 1]) else _NW_MISMATCH
+            score[i][j] = max(score[i - 1][j - 1] + sub,
+                              score[i - 1][j] + _NW_GAP,
+                              score[i][j - 1] + _NW_GAP)
+
+    # Traceback (diagonal preferred on ties)
+    a_o, a_g = [], []
+    i, j = n, m
+    while i > 0 or j > 0:
+        if i > 0 and j > 0:
+            sub = _NW_MATCH if _iupac_match(o[i - 1], g[j - 1]) else _NW_MISMATCH
+            if score[i][j] == score[i - 1][j - 1] + sub:
+                a_o.append(o[i - 1]); a_g.append(g[j - 1])
+                i -= 1; j -= 1
+                continue
+        if i > 0 and score[i][j] == score[i - 1][j] + _NW_GAP:
+            a_o.append(o[i - 1]); a_g.append('-')      # oligo base absent from genome
+            i -= 1
         else:
-            k = longest_common_kmer(sub_seq_1, sub_seq_2)
-        if k != None:
-            sub_seq_1 = sub_seq_1.split(k)
-            sub_seq_2 = sub_seq_2.split(k)
-            sub_seq_1 = [sub_seq_1[0], k, sub_seq_1[1]]
-            sub_seq_2 = [sub_seq_2[0], k, sub_seq_2[1]]
-            sub_seq_1, sub_seq_2 = align_seqs(sub_seq_1, sub_seq_2)
+            a_o.append('-'); a_g.append(g[j - 1])      # extra genome base
+            j -= 1
+    return ''.join(reversed(a_o)), ''.join(reversed(a_g))
+
+
+def write_oligo_site_variant(oligo_seq, oligo_site_variant, gaps=None):
+    """Write site-variant notation (uppercase = match, lowercase = mismatch,
+    '-' = deletion, '(X)' = insertion).
+
+    Ungapped sites (TNTBLAST gaps == 0 and site length == oligo length) are
+    compared column by column with IUPAC-aware matching. Sites with gaps are
+    aligned with an IUPAC-aware Needleman-Wunsch alignment.
+    """
+    if gaps == 0 and len(oligo_seq) == len(oligo_site_variant):
+        return ''.join(
+            g.upper() if _iupac_match(o, g) else g.lower()
+            for o, g in zip(oligo_seq, oligo_site_variant)
+        )
+    aln_oligo, aln_site = _nw_align(oligo_seq, oligo_site_variant)
+    out = []
+    for o, g in zip(aln_oligo, aln_site):
+        if g == '-':
+            out.append('-')                              # deletion in genome
+        elif o == '-':
+            out.append('(' + g + ')')                    # insertion in genome
+        elif _iupac_match(o, g):
+            out.append(g)                                # match (already upper)
         else:
-            sub_seq_1 = [sub_seq_1]
-            sub_seq_2 = [sub_seq_2]
-        new_seq_1 += sub_seq_1
-        new_seq_2 += sub_seq_2
-    return new_seq_1, new_seq_2
-
-
-def write_oligo_site_variant(oligo_seq, oligo_site_variant):
-    seq_1_alignment, seq_2_alignment = align_seqs(oligo_seq, oligo_site_variant)
-    seq_1, seq_2 = '', ''
-    for sub_seq_1, sub_seq_2 in zip(seq_1_alignment, seq_2_alignment):
-        if len(sub_seq_1) == len(sub_seq_2):
-            seq_1 += sub_seq_1.upper()
-            seq_2 += sub_seq_2.upper()
-        elif len(sub_seq_1) > len(sub_seq_2):
-            seq_1 += sub_seq_1.upper()
-            seq_2 += '-' * (len(sub_seq_1) - len(sub_seq_2))
-            seq_2 += sub_seq_2.upper()
-        elif len(sub_seq_2) > len(sub_seq_1):
-            seq_1 += '-' * (len(sub_seq_2) - len(sub_seq_1))
-            seq_1 += sub_seq_1.upper()
-            seq_2 += sub_seq_2.upper()
-    oligo_site_variant = ''
-    seq_length = len(seq_1.rstrip('-'))
-    seq_1 = seq_1[:seq_length]
-    seq_2 = seq_2[:seq_length]
-    for base_1, base_2 in zip(seq_1, seq_2):
-        if base_1 == base_2:
-            oligo_site_variant += base_2.upper()
-        elif base_2 == '-':
-            oligo_site_variant += base_2
-        elif base_1 == '-':
-            oligo_site_variant += '(' + base_2.upper() + ')'
-        elif base_1 != base_2:
-            oligo_site_variant += base_2.lower()
-    oligo_site_variant = oligo_site_variant.replace(')(', '')
-    return oligo_site_variant
+            out.append(g.lower())                        # mismatch
+    # Merge adjacent insertions: (A)(C) -> (AC)
+    return ''.join(out).replace(')(', '')
 
 
 def get_targets(path_to_genomes):

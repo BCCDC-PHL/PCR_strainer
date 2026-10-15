@@ -398,19 +398,38 @@ Supply probe sequences 5′ → 3′ as written in your assay design — do not 
 The version string is defined at module level in `pcr_strainer.py`:
 
 ```python
-__version__ = '0.2.5'
+__version__ = '0.2.11'
 ```
 
 Releases are tagged in git — do not encode the version in the filename. To tag a release:
 
 ```bash
-git tag -a v0.2.5 -m "Description of changes"
-git push origin v0.2.5
+git tag -a v0.2.11 -m "Description of changes"
+git push origin v0.2.11
 ```
 
 ---
 
 ## Changelog
+
+### v0.2.11 (BCCDC-PHL)
+- Fixed spurious gap/insertion pairs in site-variant notation (e.g. `-` followed by
+  `(C)`) at degenerate oligo positions and homopolymer runs. The k-mer aligner in
+  `write_oligo_site_variant()` required exact, unique anchors and was not
+  IUPAC-aware, so it broke down around bases such as `S` next to runs of `C`
+- `write_oligo_site_variant()` now takes an optional `gaps` argument. When TNTBLAST
+  reports 0 gaps and the site is the same length as the oligo, an IUPAC-aware
+  column-by-column comparison is used instead of an alignment. Lowercase now means
+  a true mismatch for ungapped sites
+- Replaced the k-mer anchor aligner (`align_seqs`, `longest_common_kmer`) with an
+  IUPAC-aware Needleman-Wunsch alignment for sites where TNTBLAST reports gaps.
+  Mismatches are scored above gaps, so substitutions are preferred over
+  deletion+insertion pairs, and degenerate matches score as exact matches.
+  Alignments are cached since many genomes share identical sites
+- Probe strand auto-detection now uses IUPAC-aware matching, so degenerate
+  positions no longer count against the correct strand
+- Added a 200 nt maximum oligo length check in `read_assay_file()`, bounding the
+  cost of the alignment fallback and rejecting malformed assay files
 
 ### v0.2.10 (BCCDC-PHL)
 - **Security (F-01):** Fixed shell command injection — `run_TNTBLAST()` now uses
